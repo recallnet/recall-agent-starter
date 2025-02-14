@@ -6,10 +6,12 @@ import {
   BuyResult,
   ListResult,
   AddObjectResult,
+  BucketManager,
 } from '../../../../js-recall/packages/sdk/dist/index.js'; // to replace with import from recall-sdk
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
 import { parseEther } from 'viem';
 import { ICotAgentRuntime } from '../../types/index.ts';
+import { RealTimeStreamReader } from './streamer.service.ts';
 
 type Address = `0x${string}`;
 type AccountInfo = {
@@ -27,7 +29,9 @@ export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
   private client: RecallClient;
   private runtime: ICotAgentRuntime;
+  private bucketManager: BucketManager;
   private syncInterval: NodeJS.Timeout | undefined;
+  private streamStopFunction: (() => void) | undefined;
   private alias: string;
   private prefix: string;
 
@@ -48,6 +52,7 @@ export class RecallService extends Service {
       }
       const wallet = walletClientFromPrivateKey(privateKey, testnet);
       this.client = new RecallClient({ walletClient: wallet });
+      this.bucketManager = this.client.bucketManager();
       this.alias = envAlias;
       this.prefix = envPrefix;
       this.runtime = _runtime;
@@ -421,6 +426,125 @@ export class RecallService extends Service {
   }
 
   /**
+   * Streams object updates in real-time from a Recall bucket.
+   * @param bucketAlias The alias of the bucket to stream from.
+   * @param key The key of the object to stream.
+   * @param onData Callback function to handle new data chunks.
+   * @param onError Optional callback function to handle errors.
+   * @returns A function to stop the streaming.
+   */
+  public async streamObjectUpdates(
+    bucketAlias: string,
+    key: string,
+    onData: (data: Uint8Array) => void,
+    onError?: (error: Error) => void,
+  ): Promise<() => void> {
+    try {
+      // Get or create the bucket first
+      const bucketAddress = await this.getOrCreateBucket(bucketAlias);
+      elizaLogger.info(
+        `Setting up stream for object ${key} in bucket ${bucketAlias} (${bucketAddress})`,
+      );
+
+      // Create the stream reader
+      const streamReader = new RealTimeStreamReader(this.bucketManager);
+
+      // Set up the stream
+      const stopStreaming = await streamReader.streamObjectUpdates(
+        bucketAddress,
+        key,
+        (data) => {
+          try {
+            onData(data);
+            elizaLogger.info(`Received ${data.length} bytes of data for ${key}`);
+          } catch (error) {
+            elizaLogger.error(`Error in onData callback: ${error.message}`);
+            if (onError) {
+              onError(error instanceof Error ? error : new Error(String(error)));
+            }
+          }
+        },
+        (error) => {
+          elizaLogger.error(`Stream error for ${key}: ${error.message}`);
+          if (onError) {
+            onError(error);
+          }
+        },
+      );
+
+      // Return a wrapped stop function that includes logging
+      return () => {
+        stopStreaming();
+        elizaLogger.info(`Stopped streaming for object ${key} in bucket ${bucketAlias}`);
+      };
+    } catch (error) {
+      elizaLogger.error(`Error setting up stream for ${key}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Streams all objects in a bucket in real-time.
+   * @param bucketAlias The alias of the bucket to stream from.
+   * @param onData Callback function to handle new data chunks.
+   * @param onError Optional callback function to handle errors.
+   * @returns A function to stop all streams.
+   */
+  public async streamAllObjects(
+    bucketAlias: string,
+    onData: (key: string, data: Uint8Array) => void,
+    onError?: (key: string, error: Error) => void,
+  ): Promise<() => void> {
+    try {
+      // Get or create the bucket first
+      const bucketAddress = await this.getOrCreateBucket(bucketAlias);
+      elizaLogger.info(
+        `Setting up streams for all objects in bucket ${bucketAlias} (${bucketAddress})`,
+      );
+
+      // Query all objects in the bucket
+      const queryResult = await this.client.bucketManager().query(bucketAddress);
+      if (!queryResult.result?.objects.length) {
+        elizaLogger.info(`No objects found in bucket: ${bucketAlias}`);
+        return () => {}; // Return empty stop function
+      }
+
+      // Keep track of all stop functions
+      const stopFunctions: (() => void)[] = [];
+
+      // Set up streams for each object
+      for (const obj of queryResult.result.objects) {
+        try {
+          const stopStream = await this.streamObjectUpdates(
+            bucketAlias,
+            obj.key,
+            (data) => onData(obj.key, data),
+            (error) => {
+              if (onError) onError(obj.key, error);
+            },
+          );
+          stopFunctions.push(stopStream);
+          elizaLogger.info(`Started stream for object: ${obj.key}`);
+        } catch (error) {
+          elizaLogger.error(`Failed to set up stream for object ${obj.key}: ${error.message}`);
+          if (onError) {
+            onError(obj.key, error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+      }
+
+      // Return a function that stops all streams
+      return () => {
+        elizaLogger.info(`Stopping all streams for bucket ${bucketAlias}`);
+        stopFunctions.forEach((stop) => stop());
+      };
+    } catch (error) {
+      elizaLogger.error(`Error setting up bucket streams: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Starts the periodic log syncing.
    * @param intervalMs The interval in milliseconds for syncing logs.
    */
@@ -440,6 +564,29 @@ export class RecallService extends Service {
       }
     }, intervalMs);
 
+    // Start streaming all objects in the bucket
+    // Start streaming all objects in the bucket
+    this.streamAllObjects(
+      this.alias,
+      (key, data) => {
+        try {
+          const decodedData = new TextDecoder().decode(data);
+          elizaLogger.info(`Stream data received from ${key}:`, decodedData);
+        } catch (error) {
+          elizaLogger.error(`Error decoding stream data from ${key}:`, error.message);
+        }
+      },
+      (key, error) => {
+        elizaLogger.error(`Stream error for ${key}:`, error.message);
+      },
+    )
+      .then((stopFunction) => {
+        this.streamStopFunction = stopFunction;
+      })
+      .catch((error) => {
+        elizaLogger.error('Failed to initialize streams:', error.message);
+      });
+
     // Perform an immediate sync on startup
     this.syncLogsToRecall(this.alias).catch((error) =>
       elizaLogger.error(`Initial log sync failed: ${error.message}`),
@@ -454,6 +601,12 @@ export class RecallService extends Service {
       clearInterval(this.syncInterval);
       this.syncInterval = undefined;
       elizaLogger.info('Stopped periodic log syncing.');
+    }
+
+    if (this.streamStopFunction) {
+      this.streamStopFunction();
+      this.streamStopFunction = undefined;
+      elizaLogger.info('Stopped all bucket streams.');
     }
   }
 }
