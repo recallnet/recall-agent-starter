@@ -78,40 +78,39 @@ export const getTokenPriceAction: Action = {
         const tokenAddress = addressMatch[1];
         const denomination = denomMatch[1].toLowerCase();
 
-        // Get token price and denomination price
-        const tokenPrice = await tradingService.getTokenPrice(tokenAddress);
+        // All prices from getTokenPrice are in USDC
+        const tokenPriceInUSDC = await tradingService.getTokenPrice(tokenAddress);
 
-        if (tokenPrice === null) {
+        if (tokenPriceInUSDC === null) {
           text = `❌ Unable to fetch price for token **${tokenAddress}**. The token may not be supported or there might be insufficient liquidity.`;
           elizaLogger.error(`GET_TOKEN_PRICE: No price available for ${tokenAddress}`);
-        } else {
-          // If the token is SOL or USDC itself, handle directly
-          if (tokenAddress === SOL_ADDRESS && denomination === 'usdc') {
-            text = `💰 Current price for token **${tokenAddress}**:\n` + `**${tokenPrice} USDC**`;
-          } else if (tokenAddress === USDC_ADDRESS && denomination === 'sol') {
-            text = `💰 Current price for token **${tokenAddress}**:\n` + `**${tokenPrice} SOL**`;
-          } else {
-            // Get the denomination token's price for conversion
-            const denomPrice = await tradingService.getTokenPrice(
-              denomination === 'sol' ? SOL_ADDRESS : USDC_ADDRESS,
-            );
+          return true;
+        }
 
-            if (denomPrice === null) {
-              text = `❌ Unable to convert price to ${denomination.toUpperCase()}. Service may be temporarily unavailable.`;
-              elizaLogger.error(
-                `GET_TOKEN_PRICE: Unable to get denomination price for ${denomination}`,
-              );
-            } else {
-              const convertedPrice = denomination === 'sol' ? tokenPrice / denomPrice : tokenPrice;
-
-              text =
-                `💰 Current price for token **${tokenAddress}**:\n` +
-                `**${convertedPrice.toFixed(6)} ${denomination.toUpperCase()}**`;
-              elizaLogger.info(
-                `GET_TOKEN_PRICE: Successfully retrieved and converted price for ${tokenAddress}`,
-              );
-            }
+        // If we need SOL denomination, get SOL price in USDC for conversion
+        if (denomination === 'sol') {
+          const solPriceInUSDC = await tradingService.getTokenPrice(SOL_ADDRESS);
+          if (solPriceInUSDC === null) {
+            text = `❌ Unable to convert price to SOL. Service may be temporarily unavailable.`;
+            elizaLogger.error(`GET_TOKEN_PRICE: Unable to get SOL price for conversion`);
+            return true;
           }
+
+          const priceInSOL = tokenPriceInUSDC / solPriceInUSDC;
+          text =
+            `💰 Current price for token **${tokenAddress}**:\n` +
+            `**${priceInSOL.toFixed(6)} SOL**`;
+          elizaLogger.info(
+            `GET_TOKEN_PRICE: Successfully converted price to SOL for ${tokenAddress}`,
+          );
+        } else {
+          // For USDC denomination, use price directly
+          text =
+            `💰 Current price for token **${tokenAddress}**:\n` +
+            `**${tokenPriceInUSDC.toFixed(6)} USDC**`;
+          elizaLogger.info(
+            `GET_TOKEN_PRICE: Successfully retrieved USDC price for ${tokenAddress}`,
+          );
         }
       }
     } catch (error) {
