@@ -40,6 +40,10 @@ export const getCreditBalanceAction: Action = {
       return false;
     }
 
+    if (text.includes('solana') || text.includes('sol') || text.includes('solana wallet')) {
+      return false;
+    }
+
     // Ensure there are NO numeric values (to prevent confusion with BUY_CREDIT)
     const amountMatch = text.match(/([\d.]+)/);
     if (amountMatch) {
