@@ -16,6 +16,7 @@ export const recallCotProvider: Provider = {
       const recallService = runtime.services.get('recall' as ServiceType) as RecallService;
       const res = await recallService.retrieveOrderedChainOfThoughtLogs(
         process.env.RECALL_BUCKET_ALIAS,
+        _message.content.text,
       );
       return JSON.stringify(res, null, 2);
     } catch (error) {

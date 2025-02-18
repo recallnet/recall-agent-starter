@@ -14,6 +14,11 @@ import {
   AddObjectResult,
 } from '../../../../js-recall/packages/sdk/dist/entities.mjs';
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
+import duckdb from 'duckdb';
+import { TextEncoder } from 'util';
+import { createEmbedding } from './embedding.service.ts';
+import { ParquetReader } from '@dsnp/parquetjs'; // If you are actually using `ParquetReader`
+import { writeParquetToBuffer } from './stream.service.ts';
 import { parseEther } from 'viem';
 import { ICotAgentRuntime } from '../../types/index.ts';
 
@@ -246,33 +251,58 @@ export class RecallService extends Service {
   async storeBatchToRecall(bucketAddress: Address, batch: string[]): Promise<string | undefined> {
     try {
       const timestamp = Date.now();
-      const nextLogKey = `${this.prefix}${timestamp}.jsonl`;
-      const batchData = batch.join('\n');
+      const nextLogKey = `${this.prefix}${timestamp}.parquet`;
 
-      // Add 30 second timeout to the add operation
-      const addObject = await this.withTimeout(
-        this.client
-          .bucketManager()
-          .add(bucketAddress, nextLogKey, new TextEncoder().encode(batchData)),
-        30000, // 30 second timeout
-        'Recall batch storage',
+      // Process logs for Parquet
+      const logs = await Promise.all(
+        batch.map(async (jsonlEntry, index) => {
+          try {
+            const parsed = JSON.parse(jsonlEntry);
+
+            return {
+              userId: parsed.userId || '',
+              agentId: parsed.agentId || '',
+              userMessage: String(parsed.userMessage || ''),
+              log: JSON.stringify(parsed.log), // Ensure log is always a string
+              embedding: Array.from(await createEmbedding(parsed.log)), // Convert Float32Array to array
+              timestamp: new Date().toISOString(),
+            };
+          } catch (error) {
+            elizaLogger.error(`Error processing log entry ${index}: ${error.message}`);
+            return null;
+          }
+        }),
       );
 
-      // @ts-expect-error this is temporary
-      if (!addObject || !addObject.result) {
-        elizaLogger.error('Recall API returned invalid response for batch storage');
+      // Filter out failed logs
+      const validLogs = logs.filter((log) => log !== null);
+      if (validLogs.length === 0) {
+        elizaLogger.warn('No valid logs to store.');
         return undefined;
       }
 
+      const parquetBuffer = await writeParquetToBuffer(validLogs);
+      if (!parquetBuffer || parquetBuffer.length === 0) {
+        elizaLogger.warn('Generated Parquet file is empty. Skipping upload.');
+        return undefined;
+      }
+
+      // Upload to Recall
+      const addObject = await this.withTimeout(
+        this.client.bucketManager().add(bucketAddress, nextLogKey, parquetBuffer),
+        30000, // 30-second timeout
+        'Recall batch storage',
+      );
+      // @ts-expect-error this is temporary
+      if (!addObject?.result) {
+        elizaLogger.error('Recall API returned invalid response for batch storage');
+        return undefined;
+      }
       // @ts-expect-error this is temporary
       elizaLogger.info(`Successfully stored batch at key: ${addObject.result.key}`);
       return nextLogKey;
     } catch (error) {
-      if (error.message.includes('timed out')) {
-        elizaLogger.error(`Recall API timed out while storing batch`);
-      } else {
-        elizaLogger.error(`Error storing JSONL logs in Recall: ${error.message}`);
-      }
+      elizaLogger.error(`Error storing logs as Parquet in Recall: ${error.message}`);
       return undefined;
     }
   }
@@ -285,10 +315,9 @@ export class RecallService extends Service {
 
   async syncLogsToRecall(bucketAlias: string, batchSizeKB = 4): Promise<void> {
     try {
-      // Add timeout to bucket creation/retrieval
       const bucketAddress = await this.withTimeout(
         this.getOrCreateBucket(bucketAlias),
-        15000, // 15 second timeout
+        15000,
         'Get/Create bucket',
       );
 
@@ -326,7 +355,6 @@ export class RecallService extends Service {
                 batchSize + logSize
               } bytes exceeds ${batchSizeKB} KB limit. Attempting sync...`,
             );
-
             const logFileKey = await this.storeBatchToRecall(bucketAddress, batch);
 
             if (logFileKey) {
@@ -338,7 +366,6 @@ export class RecallService extends Service {
                 `Failed to sync batch of ${syncedLogIds.length} logs - will retry on next sync`,
               );
             }
-
             batch = [];
             batchSize = 0;
             syncedLogIds = [];
@@ -349,7 +376,6 @@ export class RecallService extends Service {
           syncedLogIds.push(log.id);
         } catch (error) {
           elizaLogger.error(`Error processing log entry ${log.id}: ${error.message}`);
-          failedLogIds.push(log.id);
         }
       }
       if (batch.length > 0) {
@@ -381,59 +407,185 @@ export class RecallService extends Service {
    * @returns An array of ordered chain-of-thought logs.
    */
 
-  async retrieveOrderedChainOfThoughtLogs(bucketAlias: string): Promise<any[]> {
+  async retrieveOrderedChainOfThoughtLogs(bucketAlias: string, queryText: string): Promise<any[]> {
     try {
       const bucketAddress = await this.getOrCreateBucket(bucketAlias);
       elizaLogger.info(`Retrieving chain-of-thought logs from bucket: ${bucketAddress}`);
 
-      // Query all objects with the designated prefix
+      // Query for Parquet files
       const queryResult = await this.client
         .bucketManager()
-        .query(bucketAddress, { prefix: this.prefix }); // Remove the extra '/'
+        .query(bucketAddress, { prefix: this.prefix });
 
       if (!queryResult.result?.objects.length) {
         elizaLogger.info(`No chain-of-thought logs found in bucket: ${bucketAlias}`);
         return [];
       }
 
-      // Extract log filenames and sort by timestamp
       const logFiles = queryResult.result.objects
         .map((obj) => obj.key)
-        .filter((key) => key.startsWith(this.prefix) && key.endsWith('.jsonl'))
-        .sort((a, b) => {
-          // Extract timestamps by removing prefix and .jsonl extension
-          const timeA = parseInt(a.slice(this.prefix.length, -6), 10);
-          const timeB = parseInt(b.slice(this.prefix.length, -6), 10);
-          return timeA - timeB;
-        });
-
-      elizaLogger.info(`Retrieving ${logFiles.length} ordered chain-of-thought logs...`);
+        .filter((key) => key.endsWith('.parquet'));
 
       let allLogs: any[] = [];
 
-      // Download and parse each log file
+      elizaLogger.info(`Retrieving ${logFiles.length} chain-of-thought logs...`);
+
+      // ✅ Initialize DuckDB
+      const db = new duckdb.Database(':memory:'); // In-memory DB for performance
+      const conn = db.connect();
+
+      // ✅ Create logs table if it doesn't exist
+      await new Promise<void>((resolve, reject) => {
+        conn.run(
+          `CREATE TABLE logs (
+              userId TEXT,
+              agentId TEXT,
+              userMessage TEXT,
+              log TEXT,
+              embedding FLOAT[], 
+              timestamp TEXT
+          );`,
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          },
+        );
+      });
+
+      // 🔹 Process and insert logs from Parquet
       for (const logFile of logFiles) {
         try {
+          elizaLogger.info(`Fetching log file: ${logFile}`);
           const logData = await this.client.bucketManager().get(bucketAddress, logFile);
-          if (!logData.result) continue;
 
-          // Decode and split JSONL content
-          const decodedLogs = new TextDecoder().decode(logData.result).trim().split('\n');
-          const parsedLogs = decodedLogs.map((line) => JSON.parse(line));
+          if (!logData.result) {
+            elizaLogger.warn(`Invalid or empty result for log file: ${logFile}`);
+            continue;
+          }
 
-          allLogs.push(...parsedLogs);
+          // Convert `logData.result` to a Buffer if needed
+          let parquetBuffer: Buffer;
+
+          if (Buffer.isBuffer(logData.result)) {
+            parquetBuffer = logData.result;
+          } else if (Array.isArray(logData.result) || logData.result instanceof Uint8Array) {
+            parquetBuffer = Buffer.from(logData.result);
+          } else if (typeof logData.result === 'object') {
+            parquetBuffer = Buffer.from(Object.values(logData.result) as number[]);
+          } else {
+            throw new Error(`Invalid logData.result format for log file: ${logFile}`);
+          }
+
+          elizaLogger.info(`Successfully retrieved valid Parquet buffer for ${logFile}`);
+
+          // Read Parquet file
+          const reader = await ParquetReader.openBuffer(parquetBuffer);
+          const cursor = reader.getCursor();
+
+          let record;
+          while ((record = await cursor.next())) {
+            if (record.embedding && Array.isArray(record.embedding)) {
+              allLogs.push(record);
+
+              // ✅ Ensure embedding is stored in DuckDB as an actual FLOAT ARRAY
+              const embeddingArray = record.embedding.map((num) => parseFloat(num)); // Ensure it's a FLOAT[]
+
+              await new Promise<void>((resolve, reject) => {
+                conn.run(
+                  `INSERT INTO logs VALUES (?, ?, ?, ?, CAST(? AS FLOAT[]), ?);`, // ✅ Cast embedding to FLOAT[]
+                  record.userId,
+                  record.agentId,
+                  record.userMessage,
+                  record.log,
+                  JSON.stringify(embeddingArray), // ✅ Ensure JSON.stringify() is used
+                  record.timestamp,
+                  (err) => (err ? reject(err) : resolve()),
+                );
+              });
+
+              const logsCount = await new Promise((resolve, reject) => {
+                conn.all('SELECT COUNT(*) as count FROM logs;', (err, res) => {
+                  if (err) reject(err);
+                  else resolve(res[0].count);
+                });
+              });
+
+              elizaLogger.info(`Total logs after insertion: ${logsCount}`);
+            }
+          }
+
+          await reader.close();
         } catch (error) {
-          elizaLogger.error(`Error retrieving log file ${logFile}: ${error.message}`);
+          elizaLogger.error(`Error retrieving Parquet log file ${logFile}: ${error.message}`);
         }
       }
 
+      if (allLogs.length === 0) {
+        elizaLogger.warn('No valid logs found.');
+        return [];
+      }
+
       elizaLogger.info(
-        `Successfully retrieved and ordered ${allLogs.length} chain-of-thought logs.`,
+        `Successfully stored ${allLogs.length} logs in DuckDB. Performing similarity search...`,
       );
-      return allLogs;
+
+      // ✅ Generate embedding for query
+      const queryEmbedding = new Float32Array(await createEmbedding(queryText));
+      if (!queryEmbedding || queryEmbedding.length === 0) {
+        elizaLogger.warn('Failed to generate embedding for query text.');
+        return [];
+      }
+
+      // ✅ Convert embedding into DuckDB-compatible ARRAY[]
+      const queryEmbeddingArray = `ARRAY[${[...queryEmbedding].join(',')}]`;
+
+      // 🔥 Find the top 10 most similar logs using cosine similarity
+      const query = `
+            SELECT *, 
+                1 - (embedding <-> ${queryEmbeddingArray}) AS similarity 
+            FROM logs 
+            ORDER BY similarity DESC 
+            LIMIT 5;
+        `;
+
+
+      // ✅ Execute search
+      const searchResults: any[] = await new Promise((resolve, reject) => {
+        conn.all(query, (err, res) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(res);
+          }
+        });
+      });
+
+      if (!searchResults || searchResults.length === 0) {
+        elizaLogger.warn('No matching logs found.');
+        return [];
+      }
+
+      // ✅ Sort results based on similarity score
+      const sortedLogs = searchResults
+        .map((log) => ({
+          ...log,
+          similarityScore: parseFloat(log.similarity),
+        }))
+        .sort((a, b) => b.similarityScore - a.similarityScore); // Higher similarity first
+
+      elizaLogger.info(`Returning ${sortedLogs.length} most relevant logs.`);
+      elizaLogger.info(`Top log similarity: ${sortedLogs[0].log}`);
+      const sorted = sortedLogs.map((log) => ({
+        userId: log.userId,
+        agentId: log.agentId,
+        userMessage: log.userMessage,
+        log: log.log,
+        timestamp: log.timestamp,
+      }));
+      return sorted;
     } catch (error) {
-      elizaLogger.error(`Error retrieving ordered chain-of-thought logs: ${error.message}`);
-      throw error;
+      elizaLogger.error(`Error retrieving ordered logs: ${error.message}`);
+      return [];
     }
   }
 
