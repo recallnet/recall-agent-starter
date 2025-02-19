@@ -1,18 +1,14 @@
 import {
   RecallClient,
   walletClientFromPrivateKey,
-} from '../../../../js-recall/packages/sdk/dist/client.mjs';
-import { testnet } from '../../../../js-recall/packages/sdk/dist/chains.mjs';
+} from '../../../../js-recall/packages/sdk/dist/client.cjs';
+import { testnet } from '../../../../js-recall/packages/chains/dist/index.cjs';
 import {
-  // @ts-expect-error this is temporary
   CreditAccount,
-  // @ts-expect-error this is temporary
   BuyResult,
-  // @ts-expect-error this is temporary
   ListResult,
-  // @ts-expect-error this is temporary
   AddObjectResult,
-} from '../../../../js-recall/packages/sdk/dist/entities.mjs';
+} from '../../../../js-recall/packages/sdk/dist/entities.cjs';
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
 import duckdb from 'duckdb';
 import { TextEncoder } from 'util';
@@ -30,18 +26,55 @@ type AccountInfo = {
   parentBalance?: bigint;
 };
 
+// Type for the raw log entry before processing
+export type RawLogEntry = {
+  userId: string;
+  agentId: string;
+  userMessage: string;
+  log: string;
+};
+
+// Type for the processed log record with embedding and metadata
+export type LogRecord = {
+  // Core identification fields
+  userId: string;
+  agentId: string;
+
+  // Message content
+  userMessage: string;
+  log: string;
+
+  // Vector embedding for similarity search
+  embedding: number[];
+
+  // Metadata
+  timestamp: string;
+  logFileKey?: string; // Optional as it's added during DuckDB insertion
+};
+
+// Type for search results including similarity score
+export type LogSearchResult = Omit<LogRecord, 'embedding'> & {
+  similarityScore: number;
+};
+
+// Type for the record as stored in DuckDB
+export type DuckDBLogRecord = LogRecord & {
+  logFileKey: string; // Required in DuckDB storage
+};
+
 const privateKey = process.env.RECALL_PRIVATE_KEY as `0x${string}`;
 const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
 const envPrefix = process.env.COT_LOG_PREFIX as string;
 
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
-  // @ts-expect-error this is temporary
   private client: RecallClient;
   private runtime: ICotAgentRuntime;
   private syncInterval: NodeJS.Timeout | undefined;
   private alias: string;
   private prefix: string;
+  private db: duckdb.Connection;
+  private processedFiles: Set<string> = new Set();
 
   getInstance(): RecallService {
     return RecallService.getInstance();
@@ -63,6 +96,37 @@ export class RecallService extends Service {
       this.alias = envAlias;
       this.prefix = envPrefix;
       this.runtime = _runtime;
+      // ✅ Initialize DuckDB
+      const db = new duckdb.Database(':memory:'); // In-memory DB for performance
+      this.db = db.connect();
+      // ✅ Create logs table if it doesn't exist
+      await new Promise<void>((resolve, reject) => {
+        this.db.run(
+          `CREATE TABLE logs (
+              userId TEXT,
+              agentId TEXT,
+              userMessage TEXT,
+              log TEXT,
+              embedding FLOAT[], 
+              timestamp TEXT,
+              logFileKey TEXT,
+              UNIQUE(userId, agentId, timestamp, logFileKey)
+          );
+          
+          CREATE TABLE processed_files (
+              fileKey TEXT PRIMARY KEY,
+              processedAt TEXT
+          );`,
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          },
+        );
+      });
+
+      // Load processed files into memory
+      await this.loadProcessedFiles();
+
       await this.startPeriodicSync();
       elizaLogger.success('RecallService initialized successfully, starting periodic sync.');
     } catch (error) {
@@ -94,6 +158,49 @@ export class RecallService extends Service {
       clearTimeout(timeoutId!);
       throw error;
     }
+  }
+
+  /**
+   * Loads processed files from DuckDB into memory.
+   * @returns A promise that resolves when the files are loaded.
+   */
+  private async loadProcessedFiles(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.db.all('SELECT fileKey FROM processed_files;', (err, rows: { fileKey: string }[]) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        this.processedFiles = new Set(rows.map((row) => row.fileKey));
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Marks a file as processed in both DuckDB and memory
+   * @param fileKey The key of the file to mark as processed.
+   * @returns A promise that resolves when the file is marked as processed.
+   */
+  private async markFileAsProcessed(fileKey: string): Promise<void> {
+    if (this.processedFiles.has(fileKey)) {
+      return; // Already processed
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      this.db.run(
+        'INSERT INTO processed_files (fileKey, processedAt) VALUES (?, ?);',
+        fileKey,
+        new Date().toISOString(),
+        (err) => {
+          if (err) reject(err);
+          else {
+            this.processedFiles.add(fileKey);
+            resolve();
+          }
+        },
+      );
+    });
   }
 
   /**
@@ -254,17 +361,17 @@ export class RecallService extends Service {
       const nextLogKey = `${this.prefix}${timestamp}.parquet`;
 
       // Process logs for Parquet
-      const logs = await Promise.all(
+      const logs: LogRecord[] = await Promise.all(
         batch.map(async (jsonlEntry, index) => {
           try {
-            const parsed = JSON.parse(jsonlEntry);
+            const parsed: RawLogEntry = JSON.parse(jsonlEntry);
 
             return {
               userId: parsed.userId || '',
               agentId: parsed.agentId || '',
               userMessage: String(parsed.userMessage || ''),
-              log: JSON.stringify(parsed.log), // Ensure log is always a string
-              embedding: Array.from(await createEmbedding(parsed.log)), // Convert Float32Array to array
+              log: JSON.stringify(parsed.log),
+              embedding: Array.from(await createEmbedding(parsed.log)),
               timestamp: new Date().toISOString(),
             };
           } catch (error) {
@@ -293,12 +400,10 @@ export class RecallService extends Service {
         30000, // 30-second timeout
         'Recall batch storage',
       );
-      // @ts-expect-error this is temporary
       if (!addObject?.result) {
         elizaLogger.error('Recall API returned invalid response for batch storage');
         return undefined;
       }
-      // @ts-expect-error this is temporary
       elizaLogger.info(`Successfully stored batch at key: ${addObject.result.key}`);
       return nextLogKey;
     } catch (error) {
@@ -402,12 +507,56 @@ export class RecallService extends Service {
   }
 
   /**
+   * Inserts a log into DuckDB.
+   * @param record The log record to insert.
+   * @param logFileKey The key of the log file in Recall.
+   * @param conn The DuckDB connection to use.
+   * @returns A promise that resolves when the log is inserted.
+   * @throws An error if the log cannot be inserted.
+   **/
+  private async insertLogIntoDuckDB(
+    record: LogRecord,
+    logFileKey: string,
+    conn: duckdb.Connection,
+  ): Promise<void> {
+    if (record.embedding && Array.isArray(record.embedding)) {
+      const embeddingArray = record.embedding.map((num: number) => parseFloat(num as any)); // Ensure it's a FLOAT[]
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          conn.run(
+            `INSERT INTO logs 
+             VALUES (?, ?, ?, ?, CAST(? AS FLOAT[]), ?, ?)
+             ON CONFLICT (userId, agentId, timestamp, logFileKey) DO NOTHING;`,
+            record.userId,
+            record.agentId,
+            record.userMessage,
+            record.log,
+            JSON.stringify(embeddingArray),
+            record.timestamp,
+            logFileKey,
+            (err) => (err ? reject(err) : resolve()),
+          );
+        });
+      } catch (error) {
+        if (!error.message.includes('UNIQUE constraint')) {
+          elizaLogger.error(`Error inserting log: ${error.message}`);
+          throw error;
+        }
+      }
+    }
+  }
+
+  /**
    * Retrieve and order all chain-of-thought logs from Recall.
    * @param bucketAlias The alias of the bucket to query.
    * @returns An array of ordered chain-of-thought logs.
    */
 
-  async retrieveOrderedChainOfThoughtLogs(bucketAlias: string, queryText: string): Promise<any[]> {
+  async retrieveOrderedChainOfThoughtLogs(
+    bucketAlias: string,
+    queryText: string,
+  ): Promise<LogSearchResult[]> {
     try {
       const bucketAddress = await this.getOrCreateBucket(bucketAlias);
       elizaLogger.info(`Retrieving chain-of-thought logs from bucket: ${bucketAddress}`);
@@ -422,40 +571,22 @@ export class RecallService extends Service {
         return [];
       }
 
-      const logFiles = queryResult.result.objects
+      // Filter for unprocessed Parquet files
+      const unprocessedFiles = queryResult.result.objects
         .map((obj) => obj.key)
-        .filter((key) => key.endsWith('.parquet'));
+        .filter((key) => key.endsWith('.parquet'))
+        .filter((key) => !this.processedFiles.has(key));
 
-      let allLogs: any[] = [];
+      elizaLogger.info(
+        `Found ${unprocessedFiles.length} unprocessed files out of ${
+          queryResult.result.objects.length
+        } total files`,
+      );
 
-      elizaLogger.info(`Retrieving ${logFiles.length} chain-of-thought logs...`);
-
-      // ✅ Initialize DuckDB
-      const db = new duckdb.Database(':memory:'); // In-memory DB for performance
-      const conn = db.connect();
-
-      // ✅ Create logs table if it doesn't exist
-      await new Promise<void>((resolve, reject) => {
-        conn.run(
-          `CREATE TABLE logs (
-              userId TEXT,
-              agentId TEXT,
-              userMessage TEXT,
-              log TEXT,
-              embedding FLOAT[], 
-              timestamp TEXT
-          );`,
-          (err) => {
-            if (err) reject(err);
-            else resolve();
-          },
-        );
-      });
-
-      // 🔹 Process and insert logs from Parquet
-      for (const logFile of logFiles) {
+      // Process only new files
+      for (const logFile of unprocessedFiles) {
         try {
-          elizaLogger.info(`Fetching log file: ${logFile}`);
+          elizaLogger.info(`Processing new file: ${logFile}`);
           const logData = await this.client.bucketManager().get(bucketAddress, logFile);
 
           if (!logData.result) {
@@ -463,9 +594,7 @@ export class RecallService extends Service {
             continue;
           }
 
-          // Convert `logData.result` to a Buffer if needed
           let parquetBuffer: Buffer;
-
           if (Buffer.isBuffer(logData.result)) {
             parquetBuffer = logData.result;
           } else if (Array.isArray(logData.result) || logData.result instanceof Uint8Array) {
@@ -476,88 +605,43 @@ export class RecallService extends Service {
             throw new Error(`Invalid logData.result format for log file: ${logFile}`);
           }
 
-          elizaLogger.info(`Successfully retrieved valid Parquet buffer for ${logFile}`);
-
-          // Read Parquet file
           const reader = await ParquetReader.openBuffer(parquetBuffer);
           const cursor = reader.getCursor();
 
           let record;
           while ((record = await cursor.next())) {
-            if (record.embedding && Array.isArray(record.embedding)) {
-              allLogs.push(record);
-
-              // ✅ Ensure embedding is stored in DuckDB as an actual FLOAT ARRAY
-              const embeddingArray = record.embedding.map((num) => parseFloat(num)); // Ensure it's a FLOAT[]
-
-              await new Promise<void>((resolve, reject) => {
-                conn.run(
-                  `INSERT INTO logs VALUES (?, ?, ?, ?, CAST(? AS FLOAT[]), ?);`, // ✅ Cast embedding to FLOAT[]
-                  record.userId,
-                  record.agentId,
-                  record.userMessage,
-                  record.log,
-                  JSON.stringify(embeddingArray), // ✅ Ensure JSON.stringify() is used
-                  record.timestamp,
-                  (err) => (err ? reject(err) : resolve()),
-                );
-              });
-
-              const logsCount = await new Promise((resolve, reject) => {
-                conn.all('SELECT COUNT(*) as count FROM logs;', (err, res) => {
-                  if (err) reject(err);
-                  else resolve(res[0].count);
-                });
-              });
-
-              elizaLogger.info(`Total logs after insertion: ${logsCount}`);
-            }
+            await this.insertLogIntoDuckDB(record, logFile, this.db);
           }
 
           await reader.close();
+          await this.markFileAsProcessed(logFile);
         } catch (error) {
-          elizaLogger.error(`Error retrieving Parquet log file ${logFile}: ${error.message}`);
+          elizaLogger.error(`Error processing file ${logFile}: ${error.message}`);
         }
       }
 
-      if (allLogs.length === 0) {
-        elizaLogger.warn('No valid logs found.');
-        return [];
-      }
-
-      elizaLogger.info(
-        `Successfully stored ${allLogs.length} logs in DuckDB. Performing similarity search...`,
-      );
-
-      // ✅ Generate embedding for query
+      // Generate embedding for query
       const queryEmbedding = new Float32Array(await createEmbedding(queryText));
       if (!queryEmbedding || queryEmbedding.length === 0) {
         elizaLogger.warn('Failed to generate embedding for query text.');
         return [];
       }
 
-      // ✅ Convert embedding into DuckDB-compatible ARRAY[]
       const queryEmbeddingArray = `ARRAY[${[...queryEmbedding].join(',')}]`;
 
-      // 🔥 Find the top 10 most similar logs using cosine similarity
-      const query = `
-            SELECT *, 
-                1 - (embedding <-> ${queryEmbeddingArray}) AS similarity 
-            FROM logs 
-            ORDER BY similarity DESC 
-            LIMIT 5;
-        `;
-
-
-      // ✅ Execute search
+      // Perform similarity search on all stored logs
       const searchResults: any[] = await new Promise((resolve, reject) => {
-        conn.all(query, (err, res) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(res);
-          }
-        });
+        this.db.all(
+          `SELECT DISTINCT userId, agentId, userMessage, log, timestamp,
+              1 - (embedding <-> ${queryEmbeddingArray}) AS similarity 
+           FROM logs 
+           ORDER BY similarity DESC 
+           LIMIT 5;`,
+          (err, res) => {
+            if (err) reject(err);
+            else resolve(res);
+          },
+        );
       });
 
       if (!searchResults || searchResults.length === 0) {
@@ -565,24 +649,24 @@ export class RecallService extends Service {
         return [];
       }
 
-      // ✅ Sort results based on similarity score
+      // Sort and return results
       const sortedLogs = searchResults
         .map((log) => ({
           ...log,
           similarityScore: parseFloat(log.similarity),
         }))
-        .sort((a, b) => b.similarityScore - a.similarityScore); // Higher similarity first
+        .sort((a, b) => b.similarityScore - a.similarityScore);
 
       elizaLogger.info(`Returning ${sortedLogs.length} most relevant logs.`);
-      elizaLogger.info(`Top log similarity: ${sortedLogs[0].log}`);
-      const sorted = sortedLogs.map((log) => ({
+
+      return sortedLogs.map((log) => ({
         userId: log.userId,
         agentId: log.agentId,
         userMessage: log.userMessage,
         log: log.log,
         timestamp: log.timestamp,
+        similarityScore: log.similarityScore,
       }));
-      return sorted;
     } catch (error) {
       elizaLogger.error(`Error retrieving ordered logs: ${error.message}`);
       return [];
