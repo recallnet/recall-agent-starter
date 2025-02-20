@@ -1,21 +1,19 @@
 import {
   RecallClient,
   walletClientFromPrivateKey,
-} from '../../../../js-recall/packages/sdk/dist/client.cjs';
-import { testnet } from '../../../../js-recall/packages/chains/dist/index.cjs';
-import {
-  CreditAccount,
-  BuyResult,
-  ListResult,
-  AddObjectResult,
-} from '../../../../js-recall/packages/sdk/dist/entities.cjs';
+} from '../../../../js-recall/packages/sdk/dist/client.mjs';
+import { testnet } from '../../../../js-recall/packages/chains/dist/index.mjs';
+// @ts-expect-error - this is temporary
+import { CreditAccount } from '../../../../js-recall/packages/sdk/dist/credit.mjs';
+// @ts-expect-error - this is temporary
+import { ListResult } from '../../../../js-recall/packages/sdk/dist/bucket.mjs';
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
 import duckdb from 'duckdb';
 import { TextEncoder } from 'util';
 import { createEmbedding } from './embedding.service.ts';
 import { ParquetReader } from '@dsnp/parquetjs'; // If you are actually using `ParquetReader`
 import { writeParquetToBuffer } from './stream.service.ts';
-import { parseEther } from 'viem';
+import { parseEther, TransactionReceipt } from 'viem';
 import { ICotAgentRuntime } from '../../types/index.ts';
 
 type Address = `0x${string}`;
@@ -52,6 +50,13 @@ export type LogRecord = {
   logFileKey?: string; // Optional as it's added during DuckDB insertion
 };
 
+type Result<T = unknown> = {
+  result: T;
+  meta?: {
+    tx?: TransactionReceipt;
+  };
+};
+
 // Type for search results including similarity score
 export type LogSearchResult = Omit<LogRecord, 'embedding'> & {
   similarityScore: number;
@@ -68,6 +73,7 @@ const envPrefix = process.env.COT_LOG_PREFIX as string;
 
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
+  // @ts-expect-error this is temporary
   private client: RecallClient;
   private runtime: ICotAgentRuntime;
   private syncInterval: NodeJS.Timeout | undefined;
@@ -254,10 +260,10 @@ export class RecallService extends Service {
    * @returns The result of the buy operation.
    */
 
-  public async buyCredit(amount: string): Promise<BuyResult> | undefined {
+  public async buyCredit(amount: string): Promise<Result> {
     try {
       const info = await this.client.creditManager().buy(parseEther(amount));
-      return info.result;
+      return info; // Return the full Result object
     } catch (error) {
       elizaLogger.error(`Error buying credit: ${error.message}`);
       throw error;
@@ -309,9 +315,17 @@ export class RecallService extends Service {
    * Adds an object to a bucket.
    * @param bucket The address of the bucket.
    * @param key The key under which to store the object.
-   * @param data The data to store.
-   * @param options Optional options for adding the object.
-   * @returns An object containing the owner's address, bucket address, and key.
+   * @param data The data to store (string, File, or Uint8Array).
+   * @param options Optional parameters:
+   *   - overwrite: Whether to overwrite existing object with same key (default: false)
+   *   - ttl: Time-to-live in seconds (must be >= MIN_TTL if specified)
+   *   - metadata: Additional metadata key-value pairs
+   * @returns A Result object containing:
+   *   - result: Empty object ({})
+   *   - meta: Optional metadata including transaction receipt
+   * @throws {InvalidValue} If object size exceeds MAX_OBJECT_SIZE or TTL is invalid
+   * @throws {ActorNotFound} If the bucket or actor is not found
+   * @throws {AddObjectError} If the object addition fails
    */
 
   public async addObject(
@@ -319,12 +333,12 @@ export class RecallService extends Service {
     key: string,
     data: string | File | Uint8Array,
     options?: { overwrite?: boolean },
-  ): Promise<AddObjectResult | undefined> {
+  ): Promise<Result> {
     try {
       const info = await this.client.bucketManager().add(bucket, key, data, {
         overwrite: options?.overwrite ?? false,
       });
-      return info.result;
+      return info; // Return the full Result object
     } catch (error) {
       elizaLogger.error(`Error adding object: ${error.message}`);
       throw error;
@@ -400,11 +414,14 @@ export class RecallService extends Service {
         30000, // 30-second timeout
         'Recall batch storage',
       );
-      if (!addObject?.result) {
+      // @ts-expect-error this is temporary
+      if (!addObject?.meta?.tx) {
+        // Check for transaction receipt instead of result
         elizaLogger.error('Recall API returned invalid response for batch storage');
         return undefined;
       }
-      elizaLogger.info(`Successfully stored batch at key: ${addObject.result.key}`);
+
+      elizaLogger.info(`Successfully stored batch at key: ${nextLogKey}`);
       return nextLogKey;
     } catch (error) {
       elizaLogger.error(`Error storing logs as Parquet in Recall: ${error.message}`);
