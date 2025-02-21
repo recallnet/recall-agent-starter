@@ -18,6 +18,7 @@ const privateKey = process.env.RECALL_PRIVATE_KEY as Hex;
 const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
 const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
 const network = process.env.RECALL_NETWORK as string;
+const syncInterval = process.env.RECALL_SYNC_INTERVAL as string;
 
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
@@ -26,6 +27,7 @@ export class RecallService extends Service {
   private syncInterval: NodeJS.Timeout | undefined;
   private alias: string;
   private prefix: string;
+  private intervalMs: number;
 
   getInstance(): RecallService {
     return RecallService.getInstance();
@@ -48,7 +50,9 @@ export class RecallService extends Service {
       this.alias = envAlias;
       this.prefix = envPrefix;
       this.runtime = _runtime;
-      await this.startPeriodicSync();
+      // Use user-defined sync interval and batch size, if provided
+      this.intervalMs = syncInterval ? parseInt(syncInterval, 10) : 2 * 60 * 1000;
+      this.startPeriodicSync(this.intervalMs);
       elizaLogger.success('RecallService initialized successfully, starting periodic sync.');
     } catch (error) {
       elizaLogger.error(`Error initializing RecallService: ${error.message}`);
@@ -361,7 +365,11 @@ export class RecallService extends Service {
           `Sync attempt finished. ${failedLogIds.length} logs failed to upload and remain unsynced. Will retry next cycle.`,
         );
       } else {
-        elizaLogger.info('Sync cycle complete. Next sync in 2 minutes.');
+        const logSyncInterval =
+          this.intervalMs < 60000
+            ? `${this.intervalMs / 1000} seconds`
+            : `${this.intervalMs / 1000 / 60} minute`;
+        elizaLogger.info(`Sync cycle complete. Next sync in ${logSyncInterval}.`);
       }
     } catch (error) {
       if (error.message.includes('timed out')) {
