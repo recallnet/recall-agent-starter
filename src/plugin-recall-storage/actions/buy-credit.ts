@@ -86,12 +86,15 @@ export const buyCreditAction: Action = {
           // Call RecallService to buy credit
           const result = await recallService.buyCredit(amount.toString());
 
-          if (result) {
-            text = `✅ Successfully purchased ${amount} Recall credits!`;
-            elizaLogger.info(`BUY_CREDIT success: ${amount} credits added.`);
+          if (result?.meta?.tx) {
+            // Check for transaction receipt instead of direct result
+            text = `✅ Successfully purchased ${amount} Recall credits! Transaction hash: ${result.meta.tx.transactionHash}`;
+            elizaLogger.info(
+              `BUY_CREDIT success: ${amount} credits added. TX: ${result.meta.tx.transactionHash}`,
+            );
           } else {
             text = '❌ Credit purchase failed. Please try again later.';
-            elizaLogger.error('BUY_CREDIT failed: No response from RecallService.');
+            elizaLogger.error('BUY_CREDIT failed: Transaction unsuccessful');
           }
         }
       }
@@ -130,7 +133,7 @@ export const buyCreditAction: Action = {
       {
         user: '{{agentName}}',
         content: {
-          text: 'Buying 0.1 credits for your account now...',
+          text: '✅ Successfully purchased 0.1 Recall credits! Transaction hash: 0x...',
           action: 'BUY_CREDIT',
         },
       },
@@ -138,12 +141,12 @@ export const buyCreditAction: Action = {
     [
       {
         user: '{{user1}}',
-        content: { text: 'Please purchase 1.5 credits for my account' },
+        content: { text: 'Please buy 1.5 credits for my account' },
       },
       {
         user: '{{agentName}}',
         content: {
-          text: 'Purchasing 1.5 credits for your account now...',
+          text: '✅ Successfully bought 1.5 Recall credits! Transaction hash: 0x...',
           action: 'BUY_CREDIT',
         },
       },
@@ -156,7 +159,7 @@ export const buyCreditAction: Action = {
       {
         user: '{{agentName}}',
         content: {
-          text: 'Adding 3 credits to your account now...',
+          text: '✅ Successfully added 3 Recall credits to your account! Transaction hash: 0x...',
           action: 'BUY_CREDIT',
         },
       },

@@ -137,13 +137,23 @@ To receive testnet tokens, use the same public address when requesting tokens fr
 cp .env.example .env
 ```
 
-Fill in your Recall API credentials and configuration.
+Fill in your Recall credentials and configuration.
 
 ```dotenv
 RECALL_PRIVATE_KEY="your-private-key"
 RECALL_BUCKET_ALIAS="your-default-bucket"
-COT_LOG_PREFIX="cot/"
+RECALL_COT_LOG_PREFIX="cot/"
+
+# Provider configuration, defined in the `characters/eliza.character.json` file
 OPENAI_API_KEY="your-api-key"
+```
+
+Optionally, you can override the CoT sync period, batch size, and network:
+
+```dotenv
+RECALL_SYNC_INTERVAL="120000" # In milliseconds, defaults to 2 minutes
+RECALL_BATCH_SIZE="4" # In kilobytes, defaults to 4KB
+RECALL_NETWORK="testnet" # Defaults to the Recall testnet
 ```
 
 To ensure smooth operations and reduce the possibility of dependency errors, please ensure you're using the following node and pnpm versions:
@@ -154,6 +164,8 @@ node -v v22.11.0
 ```
 
 ### **2️⃣ Install Dependencies and Start the Server**
+
+Back in the root of this directory, install and start the server:
 
 ```bash
 pnpm i && pnpm start --characters="characters/eliza.character.json"

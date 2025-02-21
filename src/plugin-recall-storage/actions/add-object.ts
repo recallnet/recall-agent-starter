@@ -98,14 +98,15 @@ export const addObjectAction: Action = {
             // Call RecallService to add object
             const result = await recallService.addObject(bucketAddress, fileName, fileData);
 
-            if (result) {
-              text = `✅ Successfully added object **"${fileName}"** to bucket **"${bucketAlias}"**.`;
+            if (result?.meta?.tx) {
+              // Check for transaction receipt instead of just result
+              text = `✅ Successfully added object **"${fileName}"** to bucket **"${bucketAlias}"**. Transaction hash: ${result.meta.tx.transactionHash}`;
               elizaLogger.info(
-                `ADD_OBJECT success: "${fileName}" added to bucket "${bucketAlias}".`,
+                `ADD_OBJECT success: "${fileName}" added to bucket "${bucketAlias}". TX: ${result.meta.tx.transactionHash}`,
               );
             } else {
               text = '❌ Failed to add object to the bucket. Please try again later.';
-              elizaLogger.error('ADD_OBJECT failed: No response from RecallService.');
+              elizaLogger.error('ADD_OBJECT failed: Transaction unsuccessful');
             }
           }
         }
@@ -113,6 +114,9 @@ export const addObjectAction: Action = {
     } catch (error) {
       text = '⚠️ An error occurred while adding the object. Please try again later.';
       elizaLogger.error(`ADD_OBJECT error: ${error.message}`);
+      if (error.cause) {
+        elizaLogger.error(`ADD_OBJECT error cause: ${error.cause.message}`);
+      }
     }
 
     // Create a new memory entry for the response
@@ -144,7 +148,7 @@ export const addObjectAction: Action = {
       {
         user: '{{agentName}}',
         content: {
-          text: '✅ Successfully added object **"object.txt"** to bucket **"my-bucket"**.',
+          text: '✅ Successfully added object **"object.txt"** to bucket **"my-bucket"**. Transaction hash: 0x...',
           action: 'ADD_OBJECT',
         },
       },
@@ -157,7 +161,7 @@ export const addObjectAction: Action = {
       {
         user: '{{agentName}}',
         content: {
-          text: '✅ Successfully added object **"data.json"** to bucket **"backup"**.',
+          text: '✅ Successfully added object **"data.json"** to bucket **"backup"**. Transaction hash: 0x...',
           action: 'ADD_OBJECT',
         },
       },
@@ -170,7 +174,7 @@ export const addObjectAction: Action = {
       {
         user: '{{agentName}}',
         content: {
-          text: '✅ Successfully added object **"logs.txt"** to bucket **"logs"**.',
+          text: '✅ Successfully added object **"logs.txt"** to bucket **"logs"**. Transaction hash: 0x...',
           action: 'ADD_OBJECT',
         },
       },
