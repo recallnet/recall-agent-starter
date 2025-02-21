@@ -20,6 +20,7 @@ const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
 const network = process.env.RECALL_NETWORK as string;
 const intervalPeriod = process.env.RECALL_SYNC_INTERVAL as string;
 const batchSize = process.env.RECALL_BATCH_SIZE as string;
+
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
   private client: RecallClient;
