@@ -125,8 +125,6 @@ export class RecallService extends Service {
 
       // Load processed files into memory
       await this.loadProcessedFiles();
-
-      await this.startPeriodicSync();
       // Use user-defined sync interval and batch size, if provided
       this.intervalMs = intervalPeriod ? parseInt(intervalPeriod, 10) : 2 * 60 * 1000;
       this.batchSizeKB = batchSize ? parseInt(batchSize, 10) : 4;
