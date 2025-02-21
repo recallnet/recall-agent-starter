@@ -1,5 +1,5 @@
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
-import { testnet } from '@recallnet/chains';
+import { ChainName, getChain, testnet } from '@recallnet/chains';
 import { AccountInfo } from '@recallnet/sdk/account';
 import { ListResult } from '@recallnet/sdk/bucket';
 import { RecallClient, walletClientFromPrivateKey } from '@recallnet/sdk/client';
@@ -16,7 +16,8 @@ type Result<T = unknown> = {
 
 const privateKey = process.env.RECALL_PRIVATE_KEY as Hex;
 const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
-const envPrefix = process.env.COT_LOG_PREFIX as string;
+const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
+const network = process.env.RECALL_NETWORK as string;
 
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
@@ -32,16 +33,17 @@ export class RecallService extends Service {
 
   async initialize(_runtime: ICotAgentRuntime): Promise<void> {
     try {
-      if (!process.env.RECALL_PRIVATE_KEY) {
+      if (!privateKey) {
         throw new Error('RECALL_PRIVATE_KEY is required');
       }
-      if (!process.env.RECALL_BUCKET_ALIAS) {
+      if (!envAlias) {
         throw new Error('RECALL_BUCKET_ALIAS is required');
       }
-      if (!process.env.COT_LOG_PREFIX) {
-        throw new Error('COT_LOG_PREFIX is required');
+      if (!envPrefix) {
+        throw new Error('RECALL_COT_LOG_PREFIX is required');
       }
-      const wallet = walletClientFromPrivateKey(privateKey, testnet);
+      const chain = network ? getChain(network as ChainName) : testnet;
+      const wallet = walletClientFromPrivateKey(privateKey, chain);
       this.client = new RecallClient({ walletClient: wallet });
       this.alias = envAlias;
       this.prefix = envPrefix;
