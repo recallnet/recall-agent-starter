@@ -4,7 +4,9 @@ import { RecallService } from '../services/recall.service.ts';
 export const recallCotProvider: Provider = {
   get: async (
     runtime: IAgentRuntime,
+    // eslint-disable-next-line
     _message: Memory,
+    // eslint-disable-next-line
     _state?: State,
   ): Promise<Error | string> => {
     if (!process.env.RECALL_BUCKET_ALIAS) {

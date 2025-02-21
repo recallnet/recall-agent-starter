@@ -1,5 +1,5 @@
 import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
-import { ChainName, getChain, testnet } from '@recallnet/chains';
+import { testnet } from '@recallnet/chains';
 import { AccountInfo } from '@recallnet/sdk/account';
 import { ListResult } from '@recallnet/sdk/bucket';
 import { RecallClient, walletClientFromPrivateKey } from '@recallnet/sdk/client';
@@ -16,10 +16,7 @@ type Result<T = unknown> = {
 
 const privateKey = process.env.RECALL_PRIVATE_KEY as Hex;
 const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
-const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
-const network = process.env.RECALL_NETWORK as string;
-const intervalPeriod = process.env.RECALL_SYNC_INTERVAL as string;
-const batchSize = process.env.RECALL_BATCH_SIZE as string;
+const envPrefix = process.env.COT_LOG_PREFIX as string;
 
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
@@ -28,8 +25,6 @@ export class RecallService extends Service {
   private syncInterval: NodeJS.Timeout | undefined;
   private alias: string;
   private prefix: string;
-  private intervalMs: number;
-  private batchSizeKB: number;
 
   getInstance(): RecallService {
     return RecallService.getInstance();
@@ -37,25 +32,21 @@ export class RecallService extends Service {
 
   async initialize(_runtime: ICotAgentRuntime): Promise<void> {
     try {
-      if (!privateKey) {
+      if (!process.env.RECALL_PRIVATE_KEY) {
         throw new Error('RECALL_PRIVATE_KEY is required');
       }
-      if (!envAlias) {
+      if (!process.env.RECALL_BUCKET_ALIAS) {
         throw new Error('RECALL_BUCKET_ALIAS is required');
       }
-      if (!envPrefix) {
-        throw new Error('RECALL_COT_LOG_PREFIX is required');
+      if (!process.env.COT_LOG_PREFIX) {
+        throw new Error('COT_LOG_PREFIX is required');
       }
-      const chain = network ? getChain(network as ChainName) : testnet;
-      const wallet = walletClientFromPrivateKey(privateKey, chain);
+      const wallet = walletClientFromPrivateKey(privateKey, testnet);
       this.client = new RecallClient({ walletClient: wallet });
       this.alias = envAlias;
       this.prefix = envPrefix;
       this.runtime = _runtime;
-      // Use user-defined sync interval and batch size, if provided
-      this.intervalMs = intervalPeriod ? parseInt(intervalPeriod, 10) : 2 * 60 * 1000;
-      this.batchSizeKB = batchSize ? parseInt(batchSize, 10) : 4;
-      this.startPeriodicSync(this.intervalMs, this.batchSizeKB);
+      await this.startPeriodicSync();
       elizaLogger.success('RecallService initialized successfully, starting periodic sync.');
     } catch (error) {
       elizaLogger.error(`Error initializing RecallService: ${error.message}`);
@@ -92,6 +83,7 @@ export class RecallService extends Service {
    * Gets the account information for the current user.
    * @returns The account information.
    */
+
   public async getAccountInfo(): Promise<AccountInfo> | undefined {
     try {
       const info = await this.client.accountManager().info();
@@ -106,6 +98,7 @@ export class RecallService extends Service {
    * Lists all buckets in Recall.
    * @returns The list of buckets.
    */
+
   public async listBuckets(): Promise<ListResult> | undefined {
     try {
       const info = await this.client.bucketManager().list();
@@ -120,6 +113,7 @@ export class RecallService extends Service {
    * Gets the credit information for the account.
    * @returns The credit information.
    */
+
   public async getCreditInfo(): Promise<CreditAccount> | undefined {
     try {
       const info = await this.client.creditManager().getAccount();
@@ -135,6 +129,7 @@ export class RecallService extends Service {
    * @param amount The amount of credit to buy.
    * @returns The result of the buy operation.
    */
+
   public async buyCredit(amount: string): Promise<Result> {
     try {
       const info = await this.client.creditManager().buy(parseEther(amount));
@@ -150,6 +145,7 @@ export class RecallService extends Service {
    * @param bucketAlias The alias of the bucket to retrieve or create.
    * @returns The address of the log bucket.
    */
+
   public async getOrCreateBucket(bucketAlias: string): Promise<Address> {
     try {
       elizaLogger.info(`Looking for bucket with alias: ${bucketAlias}`);
@@ -201,6 +197,7 @@ export class RecallService extends Service {
    * @throws {ActorNotFound} If the bucket or actor is not found
    * @throws {AddObjectError} If the object addition fails
    */
+
   public async addObject(
     bucket: Address,
     key: string,
@@ -224,6 +221,7 @@ export class RecallService extends Service {
    * @param key The key under which the object is stored.
    * @returns The data stored under the specified key.
    */
+
   public async getObject(bucket: Address, key: string): Promise<Uint8Array | undefined> {
     try {
       const info = await this.client.bucketManager().get(bucket, key);
@@ -240,6 +238,7 @@ export class RecallService extends Service {
    * @param batch The batch of logs to store.
    * @returns The key under which the logs were stored.
    */
+
   async storeBatchToRecall(bucketAddress: Address, batch: string[]): Promise<string | undefined> {
     try {
       const timestamp = Date.now();
@@ -278,6 +277,7 @@ export class RecallService extends Service {
    * @param bucketAlias The alias of the bucket to store logs.
    * @param batchSizeKB The maximum size of each batch in kilobytes.
    */
+
   async syncLogsToRecall(bucketAlias: string, batchSizeKB = 4): Promise<void> {
     try {
       // Add timeout to bucket creation/retrieval
@@ -359,11 +359,7 @@ export class RecallService extends Service {
           `Sync attempt finished. ${failedLogIds.length} logs failed to upload and remain unsynced. Will retry next cycle.`,
         );
       } else {
-        const logSyncInterval =
-          this.intervalMs < 60000
-            ? `${this.intervalMs / 1000} seconds`
-            : `${this.intervalMs / 1000 / 60} minute`;
-        elizaLogger.info(`Sync cycle complete. Next sync in ${logSyncInterval}.`);
+        elizaLogger.info('Sync cycle complete. Next sync in 2 minutes.');
       }
     } catch (error) {
       if (error.message.includes('timed out')) {
@@ -379,6 +375,7 @@ export class RecallService extends Service {
    * @param bucketAlias The alias of the bucket to query.
    * @returns An array of ordered chain-of-thought logs.
    */
+
   async retrieveOrderedChainOfThoughtLogs(bucketAlias: string): Promise<any[]> {
     try {
       const bucketAddress = await this.getOrCreateBucket(bucketAlias);
@@ -438,9 +435,9 @@ export class RecallService extends Service {
   /**
    * Starts the periodic log syncing.
    * @param intervalMs The interval in milliseconds for syncing logs.
-   * @param batchSizeKB The maximum size of each batch in kilobytes.
    */
-  public startPeriodicSync(intervalMs = 2 * 60 * 1000, batchSizeKB = 4): void {
+
+  public startPeriodicSync(intervalMs = 2 * 60 * 1000): void {
     if (this.syncInterval) {
       elizaLogger.warn('Log sync is already running.');
       return;
@@ -449,14 +446,14 @@ export class RecallService extends Service {
     elizaLogger.info('Starting periodic log sync...');
     this.syncInterval = setInterval(async () => {
       try {
-        await this.syncLogsToRecall(this.alias, batchSizeKB);
+        await this.syncLogsToRecall(this.alias);
       } catch (error) {
         elizaLogger.error(`Periodic log sync failed: ${error.message}`);
       }
     }, intervalMs);
 
     // Perform an immediate sync on startup
-    this.syncLogsToRecall(this.alias, batchSizeKB).catch((error) =>
+    this.syncLogsToRecall(this.alias).catch((error) =>
       elizaLogger.error(`Initial log sync failed: ${error.message}`),
     );
   }

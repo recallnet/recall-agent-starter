@@ -21,6 +21,7 @@ export const recallStoragePlugin: Plugin = {
     getObjectAction,
     createBucketAction,
   ],
+  //   evaluators: [knowledgeEvaluator],
   providers: [recallCotProvider],
   services: [RecallService.getInstance()],
 };
