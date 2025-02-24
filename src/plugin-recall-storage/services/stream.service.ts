@@ -65,7 +65,8 @@ class MemoryStream extends Writable {
   }
 
   getBuffer(): Buffer {
-    return Buffer.concat(this.chunks);
+    const uint8Arrays = this.chunks.map((chunk) => new Uint8Array(chunk));
+    return Buffer.concat(uint8Arrays);
   }
 }
 

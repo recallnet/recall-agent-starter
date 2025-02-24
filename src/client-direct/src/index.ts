@@ -309,7 +309,7 @@ export async function generateText({
     );
 
     // (The switch statement with each provider branch remains unchanged.)
-    // For brevity, here’s just the OPENAI branch as an example:
+    // For brevity, here's just the OPENAI branch as an example:
     switch (provider) {
       case ModelProviderName.OPENAI:
       case ModelProviderName.ALI_BAILIAN:
@@ -675,7 +675,7 @@ export class DirectClient {
         const filePath = path.join(downloadDir, fileName);
         console.log('Full file path:', filePath);
 
-        await fs.promises.writeFile(filePath, buffer);
+        await fs.promises.writeFile(filePath, new Uint8Array(buffer));
 
         // Verify file was written
         const stats = await fs.promises.stat(filePath);
