@@ -98,27 +98,48 @@ export class RecallService extends Service {
       // ✅ Initialize DuckDB
       const db = new duckdb.Database(':memory:'); // In-memory DB for performance
       this.db = db.connect();
-      // ✅ Create logs table if it doesn't exist
+      // ✅ Load and Initialize DuckDB with HNSW Index
       await new Promise<void>((resolve, reject) => {
-        this.db.run(
-          `CREATE TABLE logs (
+        this.db.exec(
+          `
+          -- ✅ Load Vector Similarity Search (VSS) Extension
+          INSTALL vss;
+          LOAD vss;
+
+          -- ✅ Create Logs Table with Vector Embeddings
+          CREATE TABLE IF NOT EXISTS logs (
               userId TEXT,
               agentId TEXT,
               userMessage TEXT,
               log TEXT,
-              embedding FLOAT[], 
+              embedding FLOAT[1536], -- ⚠️ Set the correct embedding size
               timestamp TEXT,
               logFileKey TEXT,
               UNIQUE(userId, agentId, timestamp, logFileKey)
           );
-          
-          CREATE TABLE processed_files (
+
+          -- ✅ Create HNSW Index for Fast Vector Similarity Search
+          CREATE INDEX IF NOT EXISTS logs_hnsw_index 
+          ON logs USING HNSW (embedding)
+          WITH (metric = 'cosine');
+
+          -- ✅ Create Processed Files Table
+          CREATE TABLE IF NOT EXISTS processed_files (
               fileKey TEXT PRIMARY KEY,
               processedAt TEXT
-          );`,
+          );
+          `,
           (err) => {
-            if (err) reject(err);
-            else resolve();
+            if (err) {
+              elizaLogger.error(`⛔ Error creating schema: ${err.message}`, {
+                error: err,
+                stack: err.stack,
+              });
+              reject(err);
+            } else {
+              elizaLogger.info('✅ Schema created successfully with HNSW index.');
+              resolve();
+            }
           },
         );
       });
@@ -397,8 +418,8 @@ export class RecallService extends Service {
 
       // Upload to Recall
       const addObject = await this.withTimeout(
-        this.client.bucketManager().add(bucketAddress, nextLogKey, parquetBuffer),
-        30000, // 30-second timeout
+        this.client.bucketManager().add(bucketAddress, nextLogKey, Uint8Array.from(parquetBuffer)),
+        30000,
         'Recall batch storage',
       );
       if (!addObject?.meta?.tx) {
@@ -629,33 +650,47 @@ export class RecallService extends Service {
       // Generate embedding for query
       const queryEmbedding = new Float32Array(await createEmbedding(queryText));
       if (!queryEmbedding || queryEmbedding.length === 0) {
-        elizaLogger.warn('Failed to generate embedding for query text.');
+        elizaLogger.warn('⚠️ Failed to generate embedding for query text.');
         return [];
       }
 
-      const queryEmbeddingArray = `ARRAY[${[...queryEmbedding].join(',')}]`;
+      // ✅ Convert embedding into DuckDB-compatible ARRAY format
+      const queryEmbeddingArray = `ARRAY[${[...queryEmbedding].join(',')}]::FLOAT[1536]`;
 
-      // Perform similarity search on all stored logs
+      // ✅ Optimized Query Using `array_cosine_distance`
+      const query = `
+        SELECT DISTINCT userId, agentId, userMessage, log, timestamp,
+              1 - array_cosine_distance(embedding, ${queryEmbeddingArray}) AS similarity 
+        FROM logs
+        ORDER BY similarity DESC
+        LIMIT 5;
+      `;
+
+      elizaLogger.info('📝 Executing optimized SQL Query:', { query });
+
+      // ✅ Execute Query
       const searchResults: any[] = await new Promise((resolve, reject) => {
-        this.db.all(
-          `SELECT DISTINCT userId, agentId, userMessage, log, timestamp,
-              1 - (embedding <-> ${queryEmbeddingArray}) AS similarity 
-           FROM logs 
-           ORDER BY similarity DESC 
-           LIMIT 5;`,
-          (err, res) => {
-            if (err) reject(err);
-            else resolve(res);
-          },
-        );
+        this.db.all(query, (err, res) => {
+          if (err) {
+            elizaLogger.error('⛔ Error executing DuckDB query!', {
+              error: err.message,
+              stack: err.stack,
+            });
+            reject(err);
+          } else {
+            elizaLogger.info(`✅ Query executed successfully. Found ${res.length} results.`);
+            resolve(res || []);
+          }
+        });
       });
 
+      // ✅ Handle empty results
       if (!searchResults || searchResults.length === 0) {
-        elizaLogger.warn('No matching logs found.');
+        elizaLogger.warn('⚠️ No matching logs found. Consider lowering the threshold.');
         return [];
       }
 
-      // Sort and return results
+      // ✅ Sort and return results
       const sortedLogs = searchResults
         .map((log) => ({
           ...log,
@@ -663,7 +698,7 @@ export class RecallService extends Service {
         }))
         .sort((a, b) => b.similarityScore - a.similarityScore);
 
-      elizaLogger.info(`Returning ${sortedLogs.length} most relevant logs.`);
+      elizaLogger.info(`✅ Returning ${sortedLogs.length} most relevant logs.`);
 
       return sortedLogs.map((log) => ({
         userId: log.userId,

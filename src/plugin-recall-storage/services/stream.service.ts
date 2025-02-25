@@ -65,7 +65,7 @@ class MemoryStream extends Writable {
   }
 
   getBuffer(): Buffer {
-    return Buffer.concat(this.chunks);
+    return Buffer.concat(this.chunks as unknown as ReadonlyArray<Uint8Array>);
   }
 }
 
