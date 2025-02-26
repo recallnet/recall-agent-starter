@@ -666,7 +666,7 @@ export class RecallService extends Service {
         LIMIT 5;
       `;
 
-      elizaLogger.info('📝 Executing optimized SQL Query:', { query });
+      elizaLogger.info('📝 Executing optimized SQL Query');
 
       // ✅ Execute Query
       const searchResults: any[] = await new Promise((resolve, reject) => {
