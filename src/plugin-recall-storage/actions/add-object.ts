@@ -96,7 +96,11 @@ export const addObjectAction: Action = {
             elizaLogger.info(`Uploading object "${fileName}" to bucket "${bucketAlias}"...`);
 
             // Call RecallService to add object
-            const result = await recallService.addObject(bucketAddress, fileName, fileData);
+            const result = await recallService.addObject(
+              bucketAddress,
+              fileName,
+              fileData as unknown as File,
+            );
 
             if (result?.meta?.tx) {
               // Check for transaction receipt instead of just result

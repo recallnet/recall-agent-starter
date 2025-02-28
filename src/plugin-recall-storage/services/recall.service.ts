@@ -1,11 +1,23 @@
-import { elizaLogger, UUID, Service, ServiceType } from '@elizaos/core';
+import {
+  elizaLogger,
+  UUID,
+  Service,
+  ServiceType,
+  DatabaseAdapter,
+  IAgentRuntime,
+} from '@elizaos/core';
 import { ChainName, getChain, testnet } from '@recallnet/chains';
 import { AccountInfo } from '@recallnet/sdk/account';
 import { ListResult } from '@recallnet/sdk/bucket';
 import { RecallClient, walletClientFromPrivateKey } from '@recallnet/sdk/client';
 import { CreditAccount } from '@recallnet/sdk/credit';
 import { Address, Hex, parseEther, TransactionReceipt } from 'viem';
-import { ICotAgentRuntime } from '../../types/index.ts';
+import {
+  getUnsyncedLogsPostgres,
+  getUnsyncedLogsSqlite,
+  markLogsAsSyncedPostgres,
+  markLogsAsSyncedSqlite,
+} from '../utils.ts';
 
 type Result<T = unknown> = {
   result: T;
@@ -24,7 +36,7 @@ const batchSize = process.env.RECALL_BATCH_SIZE as string;
 export class RecallService extends Service {
   static serviceType: ServiceType = 'recall' as ServiceType;
   private client: RecallClient;
-  private runtime: ICotAgentRuntime;
+  private runtime: IAgentRuntime;
   private syncInterval: NodeJS.Timeout | undefined;
   private alias: string;
   private prefix: string;
@@ -35,7 +47,7 @@ export class RecallService extends Service {
     return RecallService.getInstance();
   }
 
-  async initialize(_runtime: ICotAgentRuntime): Promise<void> {
+  async initialize(_runtime: IAgentRuntime): Promise<void> {
     try {
       if (!privateKey) {
         throw new Error('RECALL_PRIVATE_KEY is required');
@@ -55,6 +67,10 @@ export class RecallService extends Service {
       // Use user-defined sync interval and batch size, if provided
       this.intervalMs = intervalPeriod ? parseInt(intervalPeriod, 10) : 2 * 60 * 1000;
       this.batchSizeKB = batchSize ? parseInt(batchSize, 10) : 4;
+
+      // Ensure isSynced column exists in logs table
+      await this.ensureRequiredColumns();
+
       this.startPeriodicSync(this.intervalMs, this.batchSizeKB);
       elizaLogger.success('RecallService initialized successfully, starting periodic sync.');
     } catch (error) {
@@ -62,6 +78,87 @@ export class RecallService extends Service {
     }
   }
 
+  /**
+   * Ensures that the isSynced column exists in the logs table.
+   * If it doesn't exist, it adds the column with a default value of false.
+   */
+  private async ensureRequiredColumns(): Promise<void> {
+    try {
+      const db: any = this.runtime.databaseAdapter;
+
+      // First, check for isSynced column
+      await this.ensureColumn(db, 'isSynced', 'BOOLEAN', 'INTEGER', 'FALSE', '0');
+
+      // Then, check for agentId column
+      await this.ensureColumn(db, 'agentId', 'TEXT', 'TEXT', 'NULL', 'NULL');
+    } catch (error) {
+      elizaLogger.error(`Error ensuring required columns: ${error.message}`);
+      throw error;
+    }
+  }
+
+  private async ensureColumn(
+    db: any,
+    columnName: string,
+    pgType: string,
+    sqliteType: string,
+    pgDefault: string,
+    sqliteDefault: string,
+  ): Promise<void> {
+    try {
+      // Check if the column exists
+      let columnExists = false;
+
+      if ('pool' in db) {
+        // PostgreSQL
+        const result = await db.pool.query(
+          `
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_name='logs' AND column_name=$1
+        `,
+          [columnName],
+        );
+        columnExists = result.rowCount > 0;
+      } else if ('db' in db) {
+        // SQLite
+        const result = db.db.prepare(`PRAGMA table_info(logs)`).all();
+        columnExists = result.some((col) => col.name === columnName);
+      } else {
+        throw new Error('Unsupported database adapter');
+      }
+
+      // Add the column if it doesn't exist
+      if (!columnExists) {
+        elizaLogger.info(`Adding ${columnName} column to logs table`);
+
+        if ('pool' in db) {
+          // PostgreSQL
+          await db.pool.query(`
+            ALTER TABLE logs 
+            ADD COLUMN "${columnName}" ${pgType} DEFAULT ${pgDefault}
+          `);
+        } else if ('db' in db) {
+          // SQLite
+          await db.db
+            .prepare(
+              `
+            ALTER TABLE logs 
+            ADD COLUMN ${columnName} ${sqliteType} DEFAULT ${sqliteDefault}
+          `,
+            )
+            .run();
+        }
+
+        elizaLogger.info(`Successfully added ${columnName} column to logs table`);
+      } else {
+        elizaLogger.info(`${columnName} column already exists in logs table`);
+      }
+    } catch (error) {
+      elizaLogger.error(`Error ensuring ${columnName} column: ${error.message}`);
+      throw error;
+    }
+  }
   /**
    * Utility function to handle timeouts for async operations.
    * @param promise The promise to execute.
@@ -230,7 +327,73 @@ export class RecallService extends Service {
       return info.result;
     } catch (error) {
       elizaLogger.warn(`Error getting object: ${error.message}`);
-      throw error;
+      // Return undefined instead of throwing to allow graceful handling of missing objects
+      return undefined;
+    }
+  }
+
+  /**
+   * Fetches unsynchronized logs based on the isSynced field.
+   * @returns Array of logs that haven't been synced yet.
+   */
+  async getUnsyncedLogs(): Promise<any[]> {
+    try {
+      const db: any = this.runtime.databaseAdapter;
+
+      if ('pool' in db) {
+        // PostgreSQL
+        return await getUnsyncedLogsPostgres(db.pool);
+      } else if ('db' in db) {
+        // SQLite
+        return await getUnsyncedLogsSqlite(db.db);
+      } else {
+        throw new Error('Unsupported database adapter');
+      }
+    } catch (error) {
+      elizaLogger.error(`Error getting unsynced logs: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Marks logs as synced in the database.
+   * @param logIds The IDs of the logs to mark as synced.
+   * @returns Whether the operation was successful.
+   */
+  async markLogsAsSynced(logIds: string[]): Promise<boolean> {
+    if (logIds.length === 0) {
+      return true;
+    }
+
+    try {
+      const db: any = this.runtime.databaseAdapter;
+
+      if ('pool' in db) {
+        // PostgreSQL
+        await markLogsAsSyncedPostgres(db.pool, logIds);
+      } else if ('db' in db) {
+        // SQLite
+        await markLogsAsSyncedSqlite(db.db, logIds);
+      } else {
+        throw new Error('Unsupported database adapter');
+      }
+
+      return true;
+    } catch (error) {
+      elizaLogger.error(`Error marking logs as synced: ${error.message}`);
+      return false;
+    }
+  }
+
+  async runRawQuery<R>(dbAdapter: DatabaseAdapter, query: string, params?: any[]): Promise<R[]> {
+    if ('pool' in dbAdapter) {
+      // PostgreSQL (uses pool.query)
+      return (await (dbAdapter as any).pool.query(query, params)).rows as R[];
+    } else if ('db' in dbAdapter) {
+      // SQLite (uses prepare + all)
+      return (dbAdapter as any).db.prepare(query).all(...(params || [])) as R[];
+    } else {
+      throw new Error('Unsupported database adapter');
     }
   }
 
@@ -238,11 +401,15 @@ export class RecallService extends Service {
    * Stores a batch of logs to Recall.
    * @param bucketAddress The address of the bucket to store logs.
    * @param batch The batch of logs to store.
+   * @param timestamp The timestamp to use in the key.
    * @returns The key under which the logs were stored.
    */
-  async storeBatchToRecall(bucketAddress: Address, batch: string[]): Promise<string | undefined> {
+  async storeBatchToRecall(
+    bucketAddress: Address,
+    batch: string[],
+    timestamp: string,
+  ): Promise<string | undefined> {
     try {
-      const timestamp = Date.now();
       const nextLogKey = `${this.prefix}${timestamp}.jsonl`;
       const batchData = batch.join('\n');
 
@@ -287,22 +454,27 @@ export class RecallService extends Service {
         'Get/Create bucket',
       );
 
-      const unsyncedLogs = await this.runtime.databaseAdapter.getUnsyncedLogs();
-      const filteredLogs = unsyncedLogs.filter((log) => log.type === 'chain-of-thought');
+      // Get logs that haven't been synced yet
+      const unsyncedLogs = await this.getUnsyncedLogs();
 
-      if (filteredLogs.length === 0) {
+      if (unsyncedLogs.length === 0) {
         elizaLogger.info('No unsynced logs to process.');
         return;
       }
 
-      elizaLogger.info(`Found ${filteredLogs.length} unsynced logs.`);
+      elizaLogger.info(`Found ${unsyncedLogs.length} unsynced logs.`);
 
       let batch: string[] = [];
       let batchSize = 0;
-      let syncedLogIds: UUID[] = [];
-      let failedLogIds: UUID[] = [];
+      let processedLogIds: string[] = [];
+      let batchTimestamp = Date.now().toString();
 
-      for (const log of filteredLogs) {
+      // Sort logs by createdAt to ensure we process in chronological order
+      unsyncedLogs.sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
+
+      for (const log of unsyncedLogs) {
         try {
           const parsedLog = JSON.parse(log.body);
           const jsonlEntry = JSON.stringify({
@@ -310,61 +482,77 @@ export class RecallService extends Service {
             agentId: parsedLog.agentId,
             userMessage: parsedLog.userMessage,
             log: parsedLog.log,
+            createdAt: log.createdAt, // Include createdAt in the stored log
           });
 
           const logSize = new TextEncoder().encode(jsonlEntry).length;
           elizaLogger.info(`Processing log entry of size: ${logSize} bytes`);
           elizaLogger.info(`New batch size: ${batchSize + logSize} bytes`);
+
+          // If this log would make the batch exceed the size limit, store the current batch first
           if (batchSize + logSize > batchSizeKB * 1024) {
             elizaLogger.info(
-              `Batch size ${
-                batchSize + logSize
-              } bytes exceeds ${batchSizeKB} KB limit. Attempting sync...`,
+              `Batch size ${batchSize + logSize} bytes exceeds ${batchSizeKB} KB limit. Attempting sync...`,
             );
 
-            const logFileKey = await this.storeBatchToRecall(bucketAddress, batch);
+            const logFileKey = await this.storeBatchToRecall(bucketAddress, batch, batchTimestamp);
 
             if (logFileKey) {
-              await this.runtime.databaseAdapter.markLogsAsSynced(syncedLogIds);
-              elizaLogger.info(`Successfully synced batch of ${syncedLogIds.length} logs`);
+              elizaLogger.info(`Successfully synced batch of ${batch.length} logs`);
+
+              // Mark logs as synced
+              if (processedLogIds.length > 0) {
+                const success = await this.markLogsAsSynced(processedLogIds);
+                if (!success) {
+                  elizaLogger.warn(`Failed to mark logs as synced - will retry on next sync`);
+                }
+              }
             } else {
-              failedLogIds.push(...syncedLogIds);
               elizaLogger.warn(
-                `Failed to sync batch of ${syncedLogIds.length} logs - will retry on next sync`,
+                `Failed to sync batch of ${batch.length} logs - will retry on next sync`,
               );
+              // Don't clear processedLogIds if sync failed
+              continue;
             }
 
+            // Start a new batch
             batch = [];
             batchSize = 0;
-            syncedLogIds = [];
+            processedLogIds = [];
+            batchTimestamp = Date.now().toString();
           }
 
           batch.push(jsonlEntry);
           batchSize += logSize;
-          syncedLogIds.push(log.id);
+          processedLogIds.push(log.id);
         } catch (error) {
           elizaLogger.error(`Error processing log entry ${log.id}: ${error.message}`);
-          failedLogIds.push(log.id);
         }
       }
+
+      // Store any remaining logs in the batch
       if (batch.length > 0) {
-        // notify the user that the batch size was not exceeded
-        elizaLogger.info(
-          `Batch size ${batchSize} bytes did not exceed ${batchSizeKB} KB limit. Will recheck on next sync cycle.`,
-        );
+        elizaLogger.info(`Storing final batch of ${batch.length} logs (${batchSize} bytes)`);
+        const logFileKey = await this.storeBatchToRecall(bucketAddress, batch, batchTimestamp);
+
+        if (logFileKey) {
+          // Mark logs as synced
+          if (processedLogIds.length > 0) {
+            const success = await this.markLogsAsSynced(processedLogIds);
+            if (!success) {
+              elizaLogger.warn(`Failed to mark logs as synced - will retry on next sync`);
+            }
+          }
+        } else {
+          elizaLogger.warn(`Failed to sync final batch of ${batch.length} logs`);
+        }
       }
 
-      if (failedLogIds.length > 0) {
-        elizaLogger.warn(
-          `Sync attempt finished. ${failedLogIds.length} logs failed to upload and remain unsynced. Will retry next cycle.`,
-        );
-      } else {
-        const logSyncInterval =
-          this.intervalMs < 60000
-            ? `${this.intervalMs / 1000} seconds`
-            : `${this.intervalMs / 1000 / 60} minutes`;
-        elizaLogger.info(`Sync cycle complete. Next sync in ${logSyncInterval}.`);
-      }
+      const logSyncInterval =
+        this.intervalMs < 60000
+          ? `${this.intervalMs / 1000} seconds`
+          : `${this.intervalMs / 1000 / 60} minutes`;
+      elizaLogger.info(`Sync cycle complete. Next sync in ${logSyncInterval}.`);
     } catch (error) {
       if (error.message.includes('timed out')) {
         elizaLogger.error(`Recall sync operation timed out: ${error.message}`);
@@ -424,6 +612,14 @@ export class RecallService extends Service {
           elizaLogger.error(`Error retrieving log file ${logFile}: ${error.message}`);
         }
       }
+
+      // Sort logs by createdAt if available, otherwise maintain file order
+      allLogs.sort((a, b) => {
+        if (a.createdAt && b.createdAt) {
+          return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        }
+        return 0;
+      });
 
       elizaLogger.info(
         `Successfully retrieved and ordered ${allLogs.length} chain-of-thought logs.`,

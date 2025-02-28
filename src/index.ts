@@ -1,9 +1,8 @@
-import { DirectClient } from './client-direct/src/index.ts';
+import { DirectClient } from '@elizaos/client-direct';
 import { AgentRuntime, elizaLogger, settings, stringToUuid, type Character } from '@elizaos/core';
 import { bootstrapPlugin } from '@elizaos/plugin-bootstrap';
 import { createNodePlugin } from '@elizaos/plugin-node';
 import { solanaPlugin } from '@elizaos/plugin-solana';
-import { recallStoragePlugin } from './plugin-recall-storage/index.ts';
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
@@ -14,6 +13,7 @@ import { startChat } from './chat/index.ts';
 import { initializeClients } from './clients/index.ts';
 import { getTokenForProvider, loadCharacters, parseArguments } from './config/index.ts';
 import { initializeDatabase } from './database/index.ts';
+import { recallStoragePlugin } from './plugin-recall-storage/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,8 +73,7 @@ async function startAgent(character: Character, directClient: DirectClient) {
 
     runtime.clients = await initializeClients(character, runtime);
 
-    const compatibleRuntime = runtime as any;
-    directClient.registerAgent(compatibleRuntime);
+    directClient.registerAgent(runtime);
 
     // report to console
     elizaLogger.debug(`Started ${character.name} as ${runtime.agentId}`);
