@@ -47,7 +47,7 @@ Actions define how the agent interacts with Recall. Each action is triggered bas
 > ✅ **"Get object \"data.json\" from bucket \"backup\""**  
 > ✅ **"Add object \"newFile.txt\" to bucket \"storage-bucket\""**  
 > ✅ **"Create a bucket for me named \"project-logs\""**  
-> ✅ **"Buy 2 Recall credits"**  
+> ✅ **"Buy 6 Recall credits"**  
 > ✅ **"How many credits do I have?"**
 
 ### **🔄 Key Implementation Notes**

@@ -1,7 +1,9 @@
-import { Character, defaultCharacter } from '@elizaos/core';
+import { Character, defaultCharacter, ModelProviderName } from '@elizaos/core';
 
 export const character: Character = {
   ...defaultCharacter,
+  modelProvider: ModelProviderName.GROQ
+  // can use OPENAI too
   // name: "Eliza",
   // plugins: [],
   // clients: [],

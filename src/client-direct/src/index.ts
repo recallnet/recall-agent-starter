@@ -276,6 +276,18 @@ export async function generateText({
         }
       }
       break;
+
+      case ModelProviderName.GROQ:
+        {
+          switch (modelClass) {
+            case ModelClass.LARGE:
+              {
+                model = runtime.getSetting('GROQ_MODEL_LARGE') || model;
+              }
+              break;
+          }
+        }
+        break;
   }
 
   elizaLogger.info('Selected model:', model);
@@ -320,6 +332,7 @@ export async function generateText({
       case ModelProviderName.TOGETHER:
       case ModelProviderName.NINETEEN_AI:
       case ModelProviderName.AKASH_CHAT_API:
+      case ModelProviderName.GROQ:
       case ModelProviderName.LMSTUDIO: {
         elizaLogger.debug('Initializing OpenAI model with Cloudflare check');
         const baseURL = getCloudflareGatewayBaseURL(runtime, 'openai') || endpoint;

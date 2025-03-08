@@ -2,7 +2,6 @@
   "name": "Elizaaa",
   "plugins": [],
   "clients": ["direct"],
-  "modelProvider": "openai",
   "settings": {
     "secrets": {},
     "voice": {
