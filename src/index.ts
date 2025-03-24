@@ -14,6 +14,7 @@ import { initializeClients } from './clients/index.ts';
 import { getTokenForProvider, loadCharacters, parseArguments } from './config/index.ts';
 import { initializeDatabase } from './database/index.ts';
 import { recallStoragePlugin } from './plugin-recall-storage/index.ts';
+import { tradingSimulatorPlugin } from './plugin-trading-simulator/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,7 +39,8 @@ export function createAgent(character: Character, db: any, cache: any, token: st
     character,
     plugins: [
       bootstrapPlugin,
-      recallStoragePlugin,
+      tradingSimulatorPlugin,
+      // recallStoragePlugin,
       nodePlugin,
       character.settings?.secrets?.WALLET_PUBLIC_KEY ? solanaPlugin : null,
     ].filter(Boolean),

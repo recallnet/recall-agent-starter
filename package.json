@@ -12,7 +12,8 @@
     "start": "tsc && node --loader ts-node/esm src/index.ts",
     "clean": "./scripts/clean.sh",
     "start:service:all": "pm2 start pnpm --name=\"all\" --restart-delay=3000 --max-restarts=10 -- run start:all",
-    "stop:service:all": "pm2 stop all"
+    "stop:service:all": "pm2 stop all",
+    "test:e2e": "tsc && node --loader ts-node/esm e2e/run-tests.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "0.0.56",

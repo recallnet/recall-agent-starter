@@ -72,7 +72,7 @@ export class RecallService extends Service {
       await this.ensureRequiredColumns();
 
       this.startPeriodicSync(this.intervalMs, this.batchSizeKB);
-      elizaLogger.success('RecallService initialized successfully, starting periodic sync.');
+      elizaLogger.info('RecallService initialized successfully, starting periodic sync.');
     } catch (error) {
       elizaLogger.error(`Error initializing RecallService: ${error.message}`);
     }
