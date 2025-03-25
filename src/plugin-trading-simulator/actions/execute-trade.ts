@@ -84,7 +84,18 @@ export const executeTradeAction: Action = {
         elizaLogger.info(
           `Getting quote for trade from ${fromToken} to ${toToken} with amount ${amount}...`,
         );
-        const quoteInfo = await tradingSimulatorService.getQuote(fromToken, toToken, amount);
+
+        // Detect chains for tokens - we can only detect the chain type, not the specific chain
+        const fromChain = tradingSimulatorService.detectChain(fromToken);
+        const toChain = tradingSimulatorService.detectChain(toToken);
+
+        const quoteInfo = await tradingSimulatorService.getQuote(
+          fromToken,
+          toToken,
+          amount,
+          fromChain,
+          toChain,
+        );
 
         // Debug the quote response to help troubleshoot
         elizaLogger.info(`Quote response success flag: ${quoteInfo?.success}`);

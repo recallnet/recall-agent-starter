@@ -158,24 +158,29 @@ export interface TradeExecutionResponse extends ApiResponse {
     toAmount: string;
     fromChain: BlockchainType;
     toChain: BlockchainType;
+    fromSpecificChain?: SpecificChain;
+    toSpecificChain?: SpecificChain;
     timestamp: string;
     status: string;
+    price?: string;
+    teamId?: string;
+    competitionId?: string;
   };
   // API might return transaction field instead of trade
   transaction?: {
     id: string;
     fromToken: string;
     toToken: string;
-    fromAmount: number | string;
-    toAmount: number | string;
-    price?: number | string;
+    fromAmount: string; // Normalized to string for consistency
+    toAmount: string; // Normalized to string for consistency
+    price?: string; // Normalized to string for consistency
     success?: boolean;
     teamId?: string;
     competitionId?: string;
-    fromChain?: BlockchainType | string;
-    toChain?: BlockchainType | string;
-    fromSpecificChain?: string;
-    toSpecificChain?: string;
+    fromChain?: BlockchainType;
+    toChain?: BlockchainType;
+    fromSpecificChain?: SpecificChain;
+    toSpecificChain?: SpecificChain;
     timestamp: string;
     status?: string;
   };
@@ -191,21 +196,27 @@ export interface QuoteResponse extends ApiResponse {
     toAmount?: string;
     exchangeRate: string;
     timestamp?: string;
+    fromChain?: BlockchainType;
+    toChain?: BlockchainType;
+    fromSpecificChain?: SpecificChain;
+    toSpecificChain?: SpecificChain;
   };
   // Direct fields for flat structure
   fromToken?: string;
   toToken?: string;
-  fromAmount?: number | string;
-  toAmount?: number | string;
-  exchangeRate?: number | string;
+  fromAmount?: string; // Normalized to string for consistency
+  toAmount?: string; // Normalized to string for consistency
+  exchangeRate?: string; // Normalized to string for consistency
   slippage?: number;
   prices?: {
     fromToken: number;
     toToken: number;
   };
   chains?: {
-    fromChain: string;
-    toChain: string;
+    fromChain: BlockchainType;
+    toChain: BlockchainType;
+    fromSpecificChain?: SpecificChain;
+    toSpecificChain?: SpecificChain;
   };
 }
 

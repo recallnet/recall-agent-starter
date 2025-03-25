@@ -161,11 +161,16 @@ export class TradingSimulatorService extends Service {
   private findTokenChainInfo(
     token: string,
   ): { chain: BlockchainType; specificChain: SpecificChain } | null {
+    if (!token) return null;
+
+    // Normalize EVM token addresses to lowercase for comparison
+    const normalizedToken = token.startsWith('0x') ? token.toLowerCase() : token;
+
     // Check SVM tokens
     if (COMMON_TOKENS.SVM) {
       for (const [specificChain, tokens] of Object.entries(COMMON_TOKENS.SVM)) {
         for (const [_, address] of Object.entries(tokens)) {
-          if (address === token) {
+          if (address === normalizedToken) {
             return {
               chain: BlockchainType.SVM,
               specificChain: SpecificChain.SVM,
@@ -179,7 +184,8 @@ export class TradingSimulatorService extends Service {
     if (COMMON_TOKENS.EVM) {
       for (const [specificChain, tokens] of Object.entries(COMMON_TOKENS.EVM)) {
         for (const [_, address] of Object.entries(tokens)) {
-          if (address.toLowerCase() === token.toLowerCase()) {
+          const normalizedAddress = (address as string).toLowerCase();
+          if (normalizedAddress === normalizedToken) {
             return {
               chain: BlockchainType.EVM,
               specificChain: specificChain as SpecificChain,
@@ -326,11 +332,12 @@ export class TradingSimulatorService extends Service {
     const payload: any = {
       fromToken: params.fromToken,
       toToken: params.toToken,
-      amount: params.amount,
+      amount: params.amount.toString(),
     };
 
     // Add optional parameters if they exist
     if (params.slippageTolerance) payload.slippageTolerance = params.slippageTolerance;
+    if (params.price) payload.price = params.price.toString();
 
     // Check if the tokens are in COMMON_TOKENS and get their chain info
     const fromTokenInfo = this.findTokenChainInfo(params.fromToken);
@@ -418,11 +425,12 @@ export class TradingSimulatorService extends Service {
         const fallbackPayload: Record<string, any> = {
           fromToken: params.fromToken,
           toToken: params.toToken,
-          amount: params.amount,
+          amount: params.amount.toString(),
         };
 
         // Only keep explicitly provided parameters
         if (params.slippageTolerance) fallbackPayload.slippageTolerance = params.slippageTolerance;
+        if (params.price) fallbackPayload.price = params.price.toString();
         if (params.fromChain) fallbackPayload.fromChain = params.fromChain;
         if (params.toChain) fallbackPayload.toChain = params.toChain;
         if (params.fromSpecificChain) fallbackPayload.fromSpecificChain = params.fromSpecificChain;
@@ -447,6 +455,8 @@ export class TradingSimulatorService extends Service {
     amount: string,
     fromChain?: BlockchainType,
     toChain?: BlockchainType,
+    fromSpecificChain?: SpecificChain,
+    toSpecificChain?: SpecificChain,
   ): Promise<QuoteResponse> {
     const queryParams = new URLSearchParams();
     queryParams.append('fromToken', fromToken);
@@ -460,10 +470,54 @@ export class TradingSimulatorService extends Service {
     if (detectedFromChain) queryParams.append('fromChain', detectedFromChain);
     if (detectedToChain) queryParams.append('toChain', detectedToChain);
 
+    // If specificChain not specified, try to find it from common tokens
+    if (!fromSpecificChain) {
+      const tokenInfo = this.findTokenChainInfo(fromToken);
+      if (tokenInfo) {
+        fromSpecificChain = tokenInfo.specificChain;
+      }
+    }
+
+    if (!toSpecificChain) {
+      const tokenInfo = this.findTokenChainInfo(toToken);
+      if (tokenInfo) {
+        toSpecificChain = tokenInfo.specificChain;
+      }
+    }
+
+    // Add specific chain information if available
+    if (fromSpecificChain) queryParams.append('fromSpecificChain', fromSpecificChain);
+    if (toSpecificChain) queryParams.append('toSpecificChain', toSpecificChain);
+
     const path = `/api/trade/quote?${queryParams.toString()}`;
 
     elizaLogger.info(`Getting quote for trade from ${fromToken} to ${toToken}`);
-    return this.request<QuoteResponse>('GET', path);
+
+    try {
+      return this.request<QuoteResponse>('GET', path);
+    } catch (error) {
+      // If the first attempt fails and it might be a cross-chain issue, try again with minimal params
+      if (error instanceof Error && error.message.includes('cross-chain')) {
+        // Create a new query with just the essential parameters
+        const fallbackParams = new URLSearchParams();
+        fallbackParams.append('fromToken', fromToken);
+        fallbackParams.append('toToken', toToken);
+        fallbackParams.append('amount', amount);
+
+        // Only add explicitly provided chain params
+        if (fromChain) fallbackParams.append('fromChain', fromChain);
+        if (toChain) fallbackParams.append('toChain', toChain);
+        if (fromSpecificChain) fallbackParams.append('fromSpecificChain', fromSpecificChain);
+        if (toSpecificChain) fallbackParams.append('toSpecificChain', toSpecificChain);
+
+        const fallbackPath = `/api/trade/quote?${fallbackParams.toString()}`;
+        elizaLogger.info(`Retrying quote with explicit parameters only`);
+        return this.request<QuoteResponse>('GET', fallbackPath);
+      }
+
+      // Re-throw the error if it's not a cross-chain issue or we can't handle it
+      throw error;
+    }
   }
 
   /**
