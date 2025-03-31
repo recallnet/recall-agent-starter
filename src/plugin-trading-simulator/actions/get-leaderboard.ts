@@ -53,52 +53,90 @@ export const getLeaderboardAction: Action = {
         currentState = await runtime.updateRecentMessageState(currentState);
       }
 
-      elizaLogger.info('Fetching leaderboard...');
+      // Check if a specific competition ID is mentioned in the message
+      const competitionIdMatch = message.content.text.match(
+        /competition(?:\s+id)?[:\s]+([a-zA-Z0-9-_]+)/i,
+      );
+      const competitionId = competitionIdMatch ? competitionIdMatch[1] : undefined;
 
-      // First check if there's an active competition
-      const competitionInfo = await tradingSimulatorService.getCompetitionStatus();
-      if (!competitionInfo.active) {
-        text =
-          '⚠️ There is no active competition at the moment. Leaderboard is only available during active competitions.';
-      } else {
-        // Fetch the leaderboard
-        const leaderboardInfo = await tradingSimulatorService.getLeaderboard();
+      elizaLogger.info(
+        `Fetching leaderboard${competitionId ? ` for competition ${competitionId}` : ''}...`,
+      );
 
-        if (
-          leaderboardInfo?.success &&
-          leaderboardInfo.leaderboard &&
-          leaderboardInfo.leaderboard.length > 0
-        ) {
-          const competitionName = competitionInfo.competition?.name || 'Current Competition';
+      // First check if there's an active competition (only if no specific ID was provided)
+      if (!competitionId) {
+        const competitionInfo = await tradingSimulatorService.getCompetitionStatus();
 
-          // Format the leaderboard
-          text = `🏆 **${competitionName} Leaderboard**\n\n`;
+        if (!competitionInfo.active) {
+          text =
+            '⚠️ There is no active competition at the moment. Leaderboard is only available during active competitions. You can specify a competition ID if you want to see past competitions.';
 
-          // Create a table header
-          text += `| **Rank** | **Team** | **Portfolio Value** | **24h Change** |\n`;
-          text += `|---------|----------|-------------------|-------------|\n`;
+          // Create a new memory entry for the response
+          const newMemory: Memory = {
+            ...message,
+            userId: message.agentId,
+            content: {
+              text,
+              action: 'GET_LEADERBOARD',
+              source: message.content.source,
+            },
+          };
 
-          // Add each team to the table
-          leaderboardInfo.leaderboard.forEach((team) => {
-            const formattedValue = team.portfolioValue.toLocaleString('en-US', {
-              style: 'currency',
-              currency: 'USD',
-              maximumFractionDigits: 0,
-            });
+          // Save to memory
+          await runtime.messageManager.createMemory(newMemory);
 
-            const changeFormatted = formatPercentage(team.change24h);
-
-            text += `| ${team.rank} | ${team.teamName} | ${formattedValue} | ${changeFormatted} |\n`;
+          // Call callback AFTER saving memory
+          await callback?.({
+            text,
           });
 
-          // Add footer with your team's ranking - display user's position if we have that info
-          // Note: Using index to find team with matching ID would require knowing the user's teamId
-          const userTeam = leaderboardInfo.leaderboard.find((team) => team.rank <= 10);
-          if (userTeam) {
-            text += `\n\n**Current Top Teams Shown** - Total Teams: ${leaderboardInfo.leaderboard.length}`;
-          }
+          return true;
+        }
+      }
 
-          // Add time remaining in competition
+      // Fetch the leaderboard with optional competition ID
+      const leaderboardInfo = await tradingSimulatorService.getLeaderboard(competitionId);
+
+      if (
+        leaderboardInfo?.success &&
+        leaderboardInfo.leaderboard &&
+        leaderboardInfo.leaderboard.length > 0
+      ) {
+        // Get competition name from the response
+        const competitionName = leaderboardInfo.competition?.name || 'Competition';
+
+        // Format the leaderboard
+        text = `🏆 **${competitionName} Leaderboard**\n\n`;
+
+        // Create a table header
+        text += `| **Rank** | **Team** | **Portfolio Value** | **24h Change** |\n`;
+        text += `|---------|----------|-------------------|-------------|\n`;
+
+        // Add each team to the table
+        leaderboardInfo.leaderboard.forEach((team) => {
+          const formattedValue = team.portfolioValue.toLocaleString('en-US', {
+            style: 'currency',
+            currency: 'USD',
+            maximumFractionDigits: 0,
+          });
+
+          const changeFormatted =
+            team.change24h !== undefined ? formatPercentage(team.change24h) : 'N/A';
+
+          text += `| ${team.rank} | ${team.teamName} | ${formattedValue} | ${changeFormatted} |\n`;
+        });
+
+        // Add footer with total teams count
+        text += `\n\n**Current Top Teams Shown** - Total Teams: ${leaderboardInfo.leaderboard.length}`;
+
+        // Add competition ID if we're viewing a specific competition
+        if (competitionId) {
+          text += `\n\n*Showing results for competition ID: ${competitionId}*`;
+        }
+
+        // Add time remaining in competition if available and if viewing active competition
+        if (!competitionId) {
+          const competitionInfo = await tradingSimulatorService.getCompetitionStatus();
           if (competitionInfo.timeRemaining) {
             const days = Math.floor(competitionInfo.timeRemaining / (1000 * 60 * 60 * 24));
             const hours = Math.floor(
@@ -107,6 +145,10 @@ export const getLeaderboardAction: Action = {
 
             text += `\n\n*Competition ends in ${days} day${days !== 1 ? 's' : ''} and ${hours} hour${hours !== 1 ? 's' : ''}*`;
           }
+        }
+      } else {
+        if (competitionId) {
+          text = `⚠️ Unable to retrieve leaderboard for competition ${competitionId}. Please verify the competition ID and try again.`;
         } else {
           text = '⚠️ Unable to retrieve leaderboard information. Please try again later.';
         }

@@ -15,6 +15,8 @@ import { getTokenForProvider, loadCharacters, parseArguments } from './config/in
 import { initializeDatabase } from './database/index.ts';
 import { recallStoragePlugin } from './plugin-recall-storage/index.ts';
 import { tradingSimulatorPlugin } from './plugin-trading-simulator/index.ts';
+import { RecallService } from './plugin-recall-storage/services/recall.service.ts';
+import { TradingSimulatorService } from './plugin-trading-simulator/services/trading-simulator.service.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +42,7 @@ export function createAgent(character: Character, db: any, cache: any, token: st
     plugins: [
       bootstrapPlugin,
       tradingSimulatorPlugin,
-      // recallStoragePlugin,
+      recallStoragePlugin,
       nodePlugin,
       character.settings?.secrets?.WALLET_PUBLIC_KEY ? solanaPlugin : null,
     ].filter(Boolean),
@@ -76,6 +78,15 @@ async function startAgent(character: Character, directClient: DirectClient) {
     runtime.clients = await initializeClients(character, runtime);
 
     directClient.registerAgent(runtime);
+
+    //register services
+    const recallService = new RecallService();
+    await recallService.initialize(runtime);
+    runtime.registerService(recallService);
+
+    const tradingSimulatorService = new TradingSimulatorService();
+    await tradingSimulatorService.initialize(runtime);
+    runtime.registerService(tradingSimulatorService);
 
     // report to console
     elizaLogger.debug(`Started ${character.name} as ${runtime.agentId}`);

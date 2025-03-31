@@ -1,5 +1,4 @@
 import { Plugin } from '@elizaos/core';
-import { RecallService } from './services/recall.service.ts';
 import { buyCreditAction } from './actions/buy-credit.ts';
 import { getCreditBalanceAction } from './actions/get-balance.ts';
 import { getAccountInfoAction } from './actions/get-account.ts';
@@ -23,7 +22,7 @@ export const recallStoragePlugin: Plugin = {
     createBucketAction,
   ],
   providers: [cotProvider],
-  services: [RecallService.getInstance()],
+  services: [],
 };
 
 export default recallStoragePlugin;

@@ -19,7 +19,7 @@ export const tradingSimulatorPlugin: Plugin = {
     getPriceAction,
   ],
   providers: [],
-  services: [TradingSimulatorService.getInstance()],
+  services: [],
 };
 
 export default tradingSimulatorPlugin;

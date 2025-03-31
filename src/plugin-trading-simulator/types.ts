@@ -247,6 +247,23 @@ export interface LeaderboardResponse extends ApiResponse {
   }>;
 }
 
+export interface CompetitionRulesResponse extends ApiResponse {
+  rules: {
+    tradingRules: string[];
+    supportedChains: string[];
+    rateLimits:
+      | string[]
+      | {
+          tradeRequestsPerMinute: number;
+          priceRequestsPerMinute: number;
+          accountRequestsPerMinute: number;
+          totalRequestsPerMinute: number;
+          totalRequestsPerHour: number;
+        };
+    slippageFormula: string;
+  };
+}
+
 // Keywords for action validation
 export const balanceKeywords = [
   'balance',

@@ -101,8 +101,12 @@ export const getPriceAction: Action = {
               `💰 **Token Price**\n\n` +
               `- **Price**: ${formatCurrency(priceInfo.price)} USD\n` +
               `- **Chain**: ${chainDisplay}\n` +
-              `- **Address**: ${token}\n` +
-              `- **Last Updated**: ${new Date(priceInfo.timestamp).toLocaleString()}`;
+              `- **Address**: ${token}`;
+
+            // Only add timestamp if it exists in the response
+            if (priceInfo.timestamp) {
+              text += `\n- **Last Updated**: ${new Date(priceInfo.timestamp).toLocaleString()}`;
+            }
           } else {
             elizaLogger.error(`GET_PRICE failed: No price info received for token ${token}.`);
             text = `⚠️ Unable to retrieve price information for token ${token}. Please ensure the token address is valid.`;
