@@ -11,6 +11,7 @@ import {
 import { TradingSimulatorService } from '../services/trading-simulator.service.ts';
 import { executeTradeKeywords } from '../types.ts';
 import { containsKeywords, extractAmount, extractTokenAddresses } from '../utils.ts';
+import { RecallService } from '../../plugin-recall-storage/services/recall.service.ts';
 
 export const executeTradeAction: Action = {
   name: 'EXECUTE_TRADE',
@@ -58,6 +59,8 @@ export const executeTradeAction: Action = {
     const tradingSimulatorService = runtime.services.get(
       'tradingsimulator' as ServiceType,
     ) as TradingSimulatorService;
+    // also get recall service
+    const recallService = runtime.services.get('recall' as ServiceType) as RecallService;
     let text = '';
 
     try {
@@ -142,6 +145,14 @@ export const executeTradeAction: Action = {
                 `- **Exchange Rate**: 1 unit ≈ ${exchangeRate} units\n` +
                 `- **Transaction ID**: ${tradeData.id}\n` +
                 `- **Timestamp**: ${new Date(tradeData.timestamp).toLocaleString()}`;
+
+              // Store trade data in Recall
+              try {
+                await recallService.storeTradeLog(tradeResult);
+                elizaLogger.info('Successfully stored trade data in Recall');
+              } catch (error) {
+                elizaLogger.error(`Failed to store trade data in Recall: ${error.message}`);
+              }
             } else {
               elizaLogger.error(`EXECUTE_TRADE failed: No trade data in response.`);
               text = `⚠️ Trade execution failed. No trade data received.`;

@@ -1,11 +1,4 @@
-import {
-  elizaLogger,
-  UUID,
-  Service,
-  ServiceType,
-  DatabaseAdapter,
-  IAgentRuntime,
-} from '@elizaos/core';
+import { elizaLogger, Service, ServiceType, DatabaseAdapter, IAgentRuntime } from '@elizaos/core';
 import { ChainName, getChain, testnet } from '@recallnet/chains';
 import { AccountInfo } from '@recallnet/sdk/account';
 import { ListResult } from '@recallnet/sdk/bucket';
@@ -27,9 +20,10 @@ type Result<T = unknown> = {
 };
 
 const privateKey = process.env.RECALL_PRIVATE_KEY as Hex;
-const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
-const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
-const network = process.env.RECALL_NETWORK as string;
+const envAlias = (process.env.RECALL_BUCKET_ALIAS ?? 'alpha-0') as string;
+const envCotPrefix = (process.env.RECALL_COT_PREFIX ?? 'competition/v0/cot/') as string;
+const envTradesPrefix = (process.env.RECALL_TRADES_PREFIX ?? 'competition/v0/trades/') as string;
+const network = (process.env.RECALL_NETWORK ?? 'testnet') as string;
 const intervalPeriod = process.env.RECALL_SYNC_INTERVAL as string;
 const batchSize = process.env.RECALL_BATCH_SIZE as string;
 
@@ -39,7 +33,8 @@ export class RecallService extends Service {
   private runtime: IAgentRuntime;
   private syncInterval: NodeJS.Timeout | undefined;
   private alias: string;
-  private prefix: string;
+  private cotPrefix: string;
+  private tradesPrefix: string;
   private intervalMs: number;
   private batchSizeKB: number;
 
@@ -52,17 +47,12 @@ export class RecallService extends Service {
       if (!privateKey) {
         throw new Error('RECALL_PRIVATE_KEY is required');
       }
-      if (!envAlias) {
-        throw new Error('RECALL_BUCKET_ALIAS is required');
-      }
-      if (!envPrefix) {
-        throw new Error('RECALL_COT_LOG_PREFIX is required');
-      }
       const chain = network ? getChain(network as ChainName) : testnet;
       const wallet = walletClientFromPrivateKey(privateKey, chain);
       this.client = new RecallClient({ walletClient: wallet });
       this.alias = envAlias;
-      this.prefix = envPrefix;
+      this.cotPrefix = envCotPrefix;
+      this.tradesPrefix = envTradesPrefix;
       this.runtime = _runtime;
       // Use user-defined sync interval and batch size, if provided
       this.intervalMs = intervalPeriod ? parseInt(intervalPeriod, 10) : 2 * 60 * 1000;
@@ -410,7 +400,7 @@ export class RecallService extends Service {
     timestamp: string,
   ): Promise<string | undefined> {
     try {
-      const nextLogKey = `${this.prefix}${timestamp}.jsonl`;
+      const nextLogKey = `${this.cotPrefix}${timestamp}.jsonl`;
       const batchData = batch.join('\n');
 
       // Add 30 second timeout to the add operation
@@ -436,6 +426,69 @@ export class RecallService extends Service {
       } else {
         elizaLogger.error(`Error storing JSONL logs in Recall: ${error.message}`);
       }
+      return undefined;
+    }
+  }
+
+  /**
+   * Stores a trade execution record to Recall.
+   * @param tradeResult The full trade result data from the API
+   * @returns The key under which the trade record was stored
+   */
+  async storeTradeLog(tradeResult: any): Promise<string | undefined> {
+    try {
+      // Get the bucket address using the configured alias
+      const bucketAddress = await this.withTimeout(
+        this.getOrCreateBucket(this.alias),
+        15000, // 15 second timeout
+        'Get/Create bucket for trade log',
+      );
+
+      // Get most recent log from database using runRawQuery
+      let recentLog: any = null;
+      try {
+        const dbAdapter: any = this.runtime.databaseAdapter;
+        const query =
+          dbAdapter && 'pool' in dbAdapter
+            ? `SELECT * FROM logs ORDER BY "createdAt" DESC LIMIT 1`
+            : `SELECT * FROM logs ORDER BY createdAt DESC LIMIT 1`;
+
+        const results = await this.runRawQuery(dbAdapter, query);
+        recentLog = results?.length > 0 ? results[0] : null;
+      } catch (error) {
+        elizaLogger.warn(`Unable to fetch recent log for trade: ${error.message}`);
+      }
+
+      // Generate trade log entry
+      const tradeLog = {
+        action: 'TRADE',
+        thought: recentLog ? JSON.parse(recentLog.body).log : 'Trade execution',
+        createdAt: recentLog ? recentLog.createdAt : new Date().toISOString(),
+        result: tradeResult,
+      };
+
+      // Create a unique key for this trade
+      const timestamp = Date.now().toString();
+      const tradeKey = `${this.tradesPrefix}${timestamp}.jsonl`;
+
+      // Store the trade log to Recall
+      const addObject = await this.withTimeout(
+        this.client
+          .bucketManager()
+          .add(bucketAddress, tradeKey, new TextEncoder().encode(JSON.stringify(tradeLog))),
+        30000, // 30 second timeout
+        'Recall trade storage',
+      );
+
+      if (!addObject?.meta?.tx) {
+        elizaLogger.error('Recall API returned invalid response for trade storage');
+        return undefined;
+      }
+
+      elizaLogger.info(`Successfully stored trade log at key: ${tradeKey}`);
+      return tradeKey;
+    } catch (error) {
+      elizaLogger.error(`Error storing trade log in Recall: ${error.message}`);
       return undefined;
     }
   }
@@ -478,10 +531,8 @@ export class RecallService extends Service {
         try {
           const parsedLog = JSON.parse(log.body);
           const jsonlEntry = JSON.stringify({
-            userId: parsedLog.userId,
-            agentId: parsedLog.agentId,
-            userMessage: parsedLog.userMessage,
-            log: parsedLog.log,
+            action: 'THINK',
+            thought: parsedLog.log,
             createdAt: log.createdAt, // Include createdAt in the stored log
           });
 
@@ -575,7 +626,7 @@ export class RecallService extends Service {
       // Query all objects with the designated prefix
       const queryResult = await this.client
         .bucketManager()
-        .query(bucketAddress, { prefix: this.prefix }); // Remove the extra '/'
+        .query(bucketAddress, { prefix: this.cotPrefix }); // Remove the extra '/'
 
       if (!queryResult.result?.objects.length) {
         elizaLogger.info(`No chain-of-thought logs found in bucket: ${bucketAlias}`);
@@ -585,11 +636,11 @@ export class RecallService extends Service {
       // Extract log filenames and sort by timestamp
       const logFiles = queryResult.result.objects
         .map((obj) => obj.key)
-        .filter((key) => key.startsWith(this.prefix) && key.endsWith('.jsonl'))
+        .filter((key) => key.startsWith(this.cotPrefix) && key.endsWith('.jsonl'))
         .sort((a, b) => {
           // Extract timestamps by removing prefix and .jsonl extension
-          const timeA = parseInt(a.slice(this.prefix.length, -6), 10);
-          const timeB = parseInt(b.slice(this.prefix.length, -6), 10);
+          const timeA = parseInt(a.slice(this.cotPrefix.length, -6), 10);
+          const timeB = parseInt(b.slice(this.cotPrefix.length, -6), 10);
           return timeA - timeB;
         });
 
