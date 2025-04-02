@@ -13,7 +13,7 @@ import { startChat } from './chat/index.ts';
 import { initializeClients } from './clients/index.ts';
 import { getTokenForProvider, loadCharacters, parseArguments } from './config/index.ts';
 import { initializeDatabase } from './database/index.ts';
-import { recallStoragePlugin } from '@elizaos-plugins/plugin-recall';
+import { recallStoragePlugin } from './plugin-recall-storage/index.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
