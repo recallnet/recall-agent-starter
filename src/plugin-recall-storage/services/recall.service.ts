@@ -36,7 +36,7 @@ type Result<T = unknown> = {
   };
 };
 
-const privateKey = process.env.RECALL_PRIVATE_KEY as Hex;
+const privateKeyRaw = process.env.RECALL_PRIVATE_KEY as Hex | string;
 const envAlias = process.env.RECALL_BUCKET_ALIAS as string;
 const envPrefix = process.env.RECALL_COT_LOG_PREFIX as string;
 const network = process.env.RECALL_NETWORK as string;
@@ -59,7 +59,7 @@ export class RecallService extends Service {
 
   async initialize(_runtime: IAgentRuntime): Promise<void> {
     try {
-      if (!privateKey) {
+      if (!privateKeyRaw) {
         throw new Error('RECALL_PRIVATE_KEY is required');
       }
       if (!envAlias) {
@@ -68,6 +68,10 @@ export class RecallService extends Service {
       if (!envPrefix) {
         throw new Error('RECALL_COT_LOG_PREFIX is required');
       }
+      // Format the private key: If it doesn't start with "0x", prepend it
+      const privateKey = privateKeyRaw.startsWith('0x')
+        ? (privateKeyRaw as Hex)
+        : (`0x${privateKeyRaw}` as Hex);
       const chain = network ? getChain(network as ChainName) : testnet;
       const wallet = walletClientFromPrivateKey(privateKey, chain);
       this.client = new RecallClient({ walletClient: wallet });
